@@ -704,7 +704,10 @@ class Bot:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
-                return json.loads(raw) if raw else {}
+                try:
+                    return json.loads(raw) if raw else {}
+                except ValueError:
+                    raise YapperError(f"{method} {path}: the server sent something that isn't JSON (is the API address right?)", r.status) from None
         except urllib.error.HTTPError as e:
             if e.code in (502, 504) and self._fallback and not on_fallback:
                 self._use_fallback(f"answered {e.code}")
@@ -994,6 +997,9 @@ class Bot:
                         self._fail(e, b["owner"], "button " + b["prefix"])
             self._emit("interaction", i)
         else:
+            if kind == "test" and not self._listeners.get("test") and self.log:
+                # "Send test event" in the developer settings: with no listener it used to vanish silently.
+                print(f"[yapper] test event received{' (' + data['message'] + ')' if isinstance(data.get('message'), str) else ''}: the bot is connected and getting events")
             self._emit(kind, Data(data, type=kind))
 
     def sync_commands(self):
@@ -1009,6 +1015,11 @@ class Bot:
             self._run()
         except KeyboardInterrupt:
             print("[yapper] stopped")
+        except YapperError as e:
+            hint = {400: "the request was rejected", 401: "the token was rejected: make a new one in Settings -> Developer",
+                    403: "this bot isn't allowed to do that"}.get(e.status, "")
+            print(f"[yapper] could not start ({e.status}): {e}" + (f"\n[yapper] {hint}" if hint else ""))
+            raise SystemExit(1) from None
         finally:
             self.running = False
             self._registered = False

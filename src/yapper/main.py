@@ -20,16 +20,39 @@
     bot.run()
 
 Save this file next to your bot and run it with `python bot.py`. Nothing to install, nothing to host:
-the bot fetches its own events from Yapin’ (long polling). Docs: https://www.yapin.gg/developers
+the bot keeps one WebSocket open to Yapin’ (the gateway) and gets its events pushed; when that is off or down
+it fetches them itself (long polling). Docs: https://www.yapin.gg/developers
 """
-import importlib, importlib.util, inspect, json, os, random, re, sys, time, traceback, urllib.error, urllib.parse, urllib.request
+import base64
+import hashlib
+import importlib
+import importlib.util
+import inspect
+import json
+import os
+import random
+import re
+import select
+import socket
+import ssl
+import struct
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
 from dotenv import load_dotenv
 
 load_dotenv()
 
 __all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button"]
+__version__ = "1.2"
 
-BASE = "https://www.yapin.gg/api/bot/v1"
+BASE = "https://bots.yapper.website/api/bot/v1"
+# The website's address for the same API: used for 10 minutes when BASE can't be reached.
+FALLBACK_BASE = "https://www.yapin.gg/api/bot/v1"
+GATEWAY = "wss://rt.yapper.website/bot"
 COMMAND_LIMIT = 100
 EVENTS = ("message", "command", "member_join", "member_leave", "reaction_add", "reaction_remove",
           "voice_join", "voice_leave", "interaction", "test", "ready", "error")
@@ -255,18 +278,172 @@ class _Owner:
         self.cogs = []        # for a file: the cogs its setup added
 
 
+def _backoff(n):
+    """Seconds to wait before try number n (1, 2, ...): 1, 2, 4 ... up to 30, with some jitter so many bots don't sync up."""
+    return min(30, 2 ** (n - 1)) * (0.75 + random.random() / 2)
+
+
+class _GatewayClosed(Exception):
+    """The gateway closed the socket. `.code` is the close code (0 when the connection just dropped)."""
+
+    def __init__(self, code=0, reason=""):
+        super().__init__(reason or f"gateway closed ({code})")
+        self.code = code
+        self.reason = reason
+
+
+def _mask(data, key):
+    n = len(data)
+    return (int.from_bytes(data, "big") ^ int.from_bytes((key * (n // 4 + 1))[:n], "big")).to_bytes(n, "big")
+
+
+class _WebSocket:
+    """Just enough of a WebSocket client (RFC 6455) for the gateway: text messages, ping/pong, close codes, TLS.
+    Standard library only, so the SDK still needs nothing installed."""
+
+    def __init__(self, url, timeout=15):
+        u = urllib.parse.urlsplit(url)
+        if u.scheme not in ("ws", "wss") or not u.hostname:
+            raise ValueError(f"Not a WebSocket URL: {url}")
+        tls = u.scheme == "wss"
+        port = u.port or (443 if tls else 80)
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        self._buf = b""
+        self._frag = None   # [opcode, bytearray] of a message still arriving in pieces
+        self.sock = socket.create_connection((u.hostname, port), timeout=timeout)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if tls:
+                self.sock = ssl.create_default_context().wrap_socket(self.sock, server_hostname=u.hostname)
+            key = base64.b64encode(os.urandom(16)).decode()
+            host = u.hostname if port == (443 if tls else 80) else f"{u.hostname}:{port}"
+            self.sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                               f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                               f"User-Agent: yapper-py/{__version__}\r\n\r\n").encode())
+            head = self._read_until(b"\r\n\r\n")
+            status, _, rest = head.partition(b"\r\n")
+            if b" 101 " not in status:
+                raise OSError(f"gateway handshake failed: {status.decode(errors='replace')[:80]}")
+            headers = {}
+            for line in rest.split(b"\r\n"):
+                k, _, v = line.decode(errors="replace").partition(":")
+                headers[k.strip().lower()] = v.strip()
+            want = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+            if headers.get("sec-websocket-accept") != want:
+                raise OSError("gateway handshake failed: bad Sec-WebSocket-Accept")
+        except BaseException:
+            self.sock.close()
+            raise
+
+    def _read_until(self, mark):
+        while mark not in self._buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise OSError("gateway closed during the handshake")
+            self._buf += chunk
+            if len(self._buf) > 65536:
+                raise OSError("gateway handshake answer too long")
+        head, self._buf = self._buf.split(mark, 1)
+        return head
+
+    def _read(self, n):
+        while len(self._buf) < n:
+            chunk = self.sock.recv(max(4096, n - len(self._buf)))
+            if not chunk:
+                raise _GatewayClosed(0, "connection lost")
+            self._buf += chunk
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def _frame(self, opcode, payload=b""):
+        n = len(payload)
+        if n < 126:
+            head = bytes([0x80 | opcode, 0x80 | n])
+        elif n < 65536:
+            head = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", n)
+        else:
+            head = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", n)
+        key = os.urandom(4)
+        self.sock.sendall(head + key + _mask(payload, key))
+
+    def send(self, obj):
+        self._frame(1, json.dumps(obj).encode())
+
+    def readable(self, wait):
+        """True when something can be read within `wait` seconds (bytes TLS already took off the wire count too)."""
+        if self._buf or getattr(self.sock, "pending", lambda: 0)():
+            return True
+        r, _, _ = select.select([self.sock], [], [], max(0.0, wait))
+        return bool(r)
+
+    def recv(self):
+        """The next text message as a string (None for a binary one). Answers pings itself; raises _GatewayClosed
+        when the other side closes."""
+        while True:
+            b1, b2 = self._read(2)
+            fin, opcode, n = b1 & 0x80, b1 & 0x0F, b2 & 0x7F
+            if n == 126:
+                n = struct.unpack("!H", self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack("!Q", self._read(8))[0]
+            if n > 16 * 1024 * 1024:
+                raise OSError("gateway frame too big")
+            key = self._read(4) if b2 & 0x80 else None
+            data = self._read(n)
+            if key:
+                data = _mask(data, key)
+            if opcode == 8:
+                code = struct.unpack("!H", data[:2])[0] if len(data) >= 2 else 0
+                try:
+                    self._frame(8, data[:2])
+                except OSError:
+                    pass
+                raise _GatewayClosed(code, data[2:].decode("utf-8", "replace"))
+            if opcode == 9:
+                self._frame(10, data)
+            elif opcode in (1, 2):
+                if fin:
+                    return data.decode("utf-8", "replace") if opcode == 1 else None
+                self._frag = [opcode, bytearray(data)]
+            elif opcode == 0 and self._frag:
+                self._frag[1] += data
+                if fin:
+                    op, whole = self._frag
+                    self._frag = None
+                    return bytes(whole).decode("utf-8", "replace") if op == 1 else None
+
+    def close(self, code=1000, reason=""):
+        try:
+            self._frame(8, struct.pack("!H", code) + reason.encode()[:120])
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 class Bot:
-    def __init__(self, token=None, base=BASE, prefixes=("/", "!"), log=True, ignore_bots=True):
+    def __init__(self, token=None, base=None, prefixes=("/", "!"), log=True, ignore_bots=True, gateway=GATEWAY):
         """`token` defaults to the YAPPER_BOT_TOKEN environment variable (bot hosting sets it for you).
-        `ignore_bots` (default True): skip messages from other bots and webhooks, so bots can't reply to each other forever."""
+        `ignore_bots` (default True): skip messages from other bots and webhooks, so bots can't reply to each other forever.
+        `gateway` (default on): where events come from over a WebSocket; used when it's on for your bot, otherwise
+        the bot long-polls. Pass None (or False) to always poll."""
         token = (token or os.environ.get("YAPPER_BOT_TOKEN") or "").strip()
         if not token.startswith("yb_"):
             raise SystemExit("Pass your bot token (starts with yb_) or set YAPPER_BOT_TOKEN. Get one in Settings -> Developer.")
         self.token = token
-        self.base = base.rstrip("/")
+        # YAPPER_API_URL: set by bot hosting (usable anywhere) to point at another API host.
+        chosen = base or os.environ.get("YAPPER_API_URL")
+        self.base = (chosen or BASE).rstrip("/")
+        # Hosted bots get our host through YAPPER_API_URL: they keep the fallback too; any other chosen base doesn't.
+        self._fallback = None if chosen and self.base != BASE else FALLBACK_BASE
+        self._fallback_until = 0
         self.prefixes = tuple(prefixes)
         self.log = log
         self.ignore_bots = ignore_bots
+        self.gateway = gateway or None
+        self._ws = None
         self.me = None
         self.last = 0
         self.running = False
@@ -520,13 +697,19 @@ class Bot:
         """Raw API call: bot.api("GET", "/servers"). A 429 with Retry-After, or Yapin’s own 503 "busy",
         is waited out and retried (nothing was done, so that's safe). Other errors raise YapperError."""
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(self.base + path, method=method, data=data, headers={
-            "Authorization": f"Bot {self.token}", "Content-Type": "application/json", "User-Agent": "yapper-py/1"})
+        on_fallback = bool(self._fallback) and time.time() < self._fallback_until
+        base = self._fallback if on_fallback else self.base
+        req = urllib.request.Request(base + path, method=method, data=data, headers={
+            "Authorization": f"Bot {self.token}", "Content-Type": "application/json", "User-Agent": f"yapper-py/{__version__}"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
+            if e.code in (502, 504) and self._fallback and not on_fallback:
+                self._use_fallback(f"answered {e.code}")
+                if method == "GET" and retries > 0:
+                    return self.api(method, path, body, timeout, retries - 1)
             try:
                 err = json.loads(e.read() or b"{}")
             except Exception:
@@ -546,6 +729,20 @@ class Bot:
                 time.sleep(wait * (1 + random.random() * 0.5))
                 return self.api(method, path, body, timeout, retries - 1)
             raise YapperError(err.get("error") or f"{method} {path} failed ({e.code})", e.code, wait or None) from None
+        except urllib.error.URLError:
+            # Our API host unreachable: the website's address for 10 minutes. A GET is asked again there at once;
+            # anything else isn't (it may have gone through), the next call goes there.
+            if not self._fallback or on_fallback:
+                raise
+            self._use_fallback("unreachable")
+            if method == "GET" and retries > 0:
+                return self.api(method, path, body, timeout, retries - 1)
+            raise
+
+    def _use_fallback(self, why):
+        self._fallback_until = time.time() + 600
+        if self.log:
+            print(f"[yapper] {self.base} {why}, using {self._fallback} for 10 minutes")
 
     # ---- messages and more ----
 
@@ -693,7 +890,9 @@ class Bot:
         opts = rtc.RoomOptions(auto_subscribe=False)
         if media_key:
             # Shared key mode encrypts our frames with media_key; HKDF (1) is how the app's browsers turn it into the frame key.
-            opts.encryption = rtc.E2EEOptions(key_provider_options=rtc.KeyProviderOptions(
+            # `e2ee`, not `encryption` (which livekit marks as the new name): `encryption` also encrypts data messages,
+            # so the key handoff went out sealed under the key it carries and the app never got it (silent bot).
+            opts.e2ee = rtc.E2EEOptions(key_provider_options=rtc.KeyProviderOptions(
                 shared_key=media_key, ratchet_window_size=0, key_ring_size=16, key_derivation_function=1))
         await room.connect(t["url"], t["token"], opts)
         keys = await _hand_out_voice_key(room, media_key) if media_key else None
@@ -841,14 +1040,33 @@ class Bot:
             print(f"[yapper] {self.me.username} is online" + (f" with {len(cmds)} command{'' if len(cmds) == 1 else 's'}" if cmds else ""))
         self._emit("ready", self.me)
         fails = 0
+        gw_fails = 0
+        gw_retry_at = 0.0
         while self.running:
-            if self._dirty:   # a cog was loaded or unloaded: send the new list once
-                try:
-                    n = len(self.sync_commands())
-                    if self.log:
-                        print(f"[yapper] commands updated ({n})")
-                except Exception as e:
-                    self._fail(e)
+            self._sync_if_dirty()
+            # The gateway first; when it's off for this bot or keeps failing, the long poll below for a while.
+            if self.gateway and time.time() >= gw_retry_at:
+                r = self._gateway_session()
+                if not self.running:
+                    break
+                if r == "bad_token":
+                    raise SystemExit("Token rejected: make a new one in Settings -> Developer")
+                if r == "disabled":
+                    gw_retry_at = time.time() + 10 * 60
+                elif r == "ok":
+                    gw_fails = 0
+                    time.sleep(_backoff(1))
+                    continue
+                else:
+                    gw_fails += 1
+                    if gw_fails >= 3:
+                        if self.log:
+                            print("[yapper] gateway unavailable, long polling for 5 minutes")
+                        gw_fails = 0
+                        gw_retry_at = time.time() + 5 * 60
+                    else:
+                        time.sleep(_backoff(gw_fails))
+                        continue
             try:
                 out = self.api("GET", f"/events?after={self.last}&wait=25", retries=0)
                 fails = 0
@@ -868,9 +1086,94 @@ class Bot:
 
     start = run
 
+    def _sync_if_dirty(self):
+        if not self._dirty:   # a cog was loaded or unloaded: send the new list once
+            return
+        try:
+            n = len(self.sync_commands())
+            if self.log:
+                print(f"[yapper] commands updated ({n})")
+        except Exception as e:
+            self._fail(e)
+
+    def _gateway_session(self):
+        """One gateway connection (docs: /developers#gateway). Picks up after self.last, so nothing is missed between
+        a long poll and the socket or across reconnects. Returns when the socket closes: "ok" (was up a while, connect
+        again), "disabled" (not on for this bot: long poll), "bad_token" or "failed"."""
+        try:
+            ws = _WebSocket(self.gateway, timeout=15)
+        except (OSError, ValueError, _GatewayClosed):
+            return "failed"
+        self._ws = ws
+        ready_at = 0.0
+        interval = 30.0
+        next_beat = 0.0
+        acked = True
+        result = "failed"
+        try:
+            while self.running:
+                if ready_at and time.time() >= next_beat:
+                    if not acked:   # no answer to the last heartbeat: the connection is dead, start over
+                        result = "ok"
+                        break
+                    acked = False
+                    ws.send({"op": "heartbeat"})
+                    next_beat = time.time() + interval
+                    continue
+                # A socket that never gets to ready doesn't hold the bot up: 15 s, then the next try (or the long poll).
+                if not ws.readable(next_beat - time.time() if ready_at else 15.0):
+                    if not ready_at:
+                        break
+                    continue
+                raw = ws.recv()
+                if raw is None:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                op = msg.get("op")
+                if op == "hello":
+                    ws.send({"op": "resume", "token": self.token, "seq": self.last})
+                elif op == "ready":
+                    ready_at = time.time()
+                    interval = max(5.0, (msg.get("heartbeat_interval") or 30000) / 1000)
+                    next_beat = ready_at + interval
+                    if self.log:
+                        print("[yapper] connected to the gateway")
+                elif op == "heartbeat_ack":
+                    acked = True
+                elif op == "event" and isinstance(msg.get("d"), dict):
+                    ev = msg["d"]
+                    # Each event once, in order: anything at or below the cursor was already handled.
+                    if isinstance(ev.get("id"), int) and ev["id"] > self.last:
+                        self.last = ev["id"]
+                        try:
+                            self.handle(ev)
+                        except Exception as e:
+                            self._fail(e)
+                    self._sync_if_dirty()
+        except _GatewayClosed as c:
+            up = ready_at and time.time() - ready_at > 10
+            result = "bad_token" if c.code == 4004 else "disabled" if c.code == 4003 else "ok" if up else "failed"
+        except OSError:
+            result = "ok" if ready_at and time.time() - ready_at > 10 else "failed"
+        finally:
+            ws.close(1000 if not self.running else 4000)
+            self._ws = None
+        return result
+
     def stop(self):
-        """Stop after the current poll."""
+        """Stop after the current poll (or close the gateway socket)."""
         self.running = False
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 
 def _module_name(name):

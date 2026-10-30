@@ -4,15 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yapper.py"
-version = "2.0.0"
+version = "1.2.0"
 authors = [
   { name="LeAndre C.", email="leandre@lecanact.me" },
 ]
-description = "An unofficial Python Library for Yapin'"
+description = "A Python Library for Yapin'"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "python-dotenv>=1.2.4",
+]
+keywords = [
+    "yapper.py",
+    "yapin.py",
+    "discord.py",
+    "yapper",
+    "yapin"
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

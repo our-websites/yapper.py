@@ -52,6 +52,7 @@ import urllib.request
 try:
     from dotenv import load_dotenv
     load_dotenv()
+    print("imported python-dotenv")
 except:
     print("python-dotenv not imported")
 

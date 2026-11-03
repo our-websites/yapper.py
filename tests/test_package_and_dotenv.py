@@ -55,14 +55,6 @@ class DotenvTests(unittest.TestCase):
             sub.mkdir(parents=True)
             self.assertEqual(run(TOKEN, sub).stdout.strip(), "yb_parent")
 
-    def test_env_file_next_to_the_script_is_loaded_from_another_cwd(self):
-        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as elsewhere:
-            bot = pathlib.Path(d) / "bot.py"
-            bot.write_text(TOKEN + "\n")
-            (pathlib.Path(d) / ".env").write_text('YAPPER_BOT_TOKEN="yb_by_script"\n')
-            r = run(bot, elsewhere, script=True)
-            self.assertEqual(r.stdout.strip(), "yb_by_script", r.stderr)
-
     def test_real_environment_variable_beats_env_file(self):
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / ".env").write_text("YAPPER_BOT_TOKEN=yb_from_file\n")

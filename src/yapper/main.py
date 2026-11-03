@@ -49,9 +49,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    print("python-dotenv not imported")
 
-load_dotenv()
 
 __all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button",
            "Embed", "Button", "Row", "TextDisplay", "Thumbnail", "Section", "MediaGallery", "Separator", "FileComponent",

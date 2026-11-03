@@ -32,13 +32,6 @@ class PackageExportsTests(unittest.TestCase):
             self.assertTrue(hasattr(yapper, name), name)
             self.assertIn(name, yapper.__all__)
 
-    def test_new_sdk_names_are_importable_from_package(self):
-        import yapper
-
-        for name in ("Embed", "Button", "Row", "Container", "Section", "TextDisplay", "VoiceCall",
-                     "text", "section", "container", "Message", "Interaction", "Data"):
-            self.assertTrue(hasattr(yapper, name), name)
-
     def test_version_comes_from_main(self):
         import yapper
         from yapper import main

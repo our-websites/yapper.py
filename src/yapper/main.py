@@ -1,5 +1,4 @@
-"""Yapin’ bot library for Python. One file, Python 3.9+, no required packages (python-dotenv, if it is installed,
-loads a .env file with YAPPER_BOT_TOKEN=yb_... for you).
+"""Yapin’ bot library for Python. One file, standard library only, Python 3.10+.
 
     import yapper
 
@@ -50,42 +49,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from dotenv import load_dotenv
 
-def _load_dotenv():
-    """Read a .env file (YAPPER_BOT_TOKEN=yb_...) when python-dotenv is installed (pip installs it with this package;
-    used as one loose file it is optional). Looks in the folder of the script you ran, then the current folder, and
-    in each parent folder, and uses the first one it finds. Variables already set in the environment win."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    starts = []
-    if sys.argv and sys.argv[0]:
-        starts.append(os.path.dirname(os.path.abspath(sys.argv[0])))
-    starts.append(os.getcwd())
-    seen = set()
-    for folder in starts:
-        while True:
-            path = os.path.join(folder, ".env")
-            if path not in seen:
-                seen.add(path)
-                if os.path.isfile(path):
-                    load_dotenv(path)
-                    return
-            parent = os.path.dirname(folder)
-            if parent == folder:
-                break
-            folder = parent
-
-
-_load_dotenv()
+load_dotenv()
 
 __all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button",
            "Embed", "Button", "Row", "TextDisplay", "Thumbnail", "Section", "MediaGallery", "Separator", "FileComponent",
            "Container", "IS_COMPONENTS_V2", "text", "thumbnail", "section", "media", "gallery", "separator", "file_display",
            "container", "Message", "Interaction", "Data", "VERSION"]
 # Stamped from public/sdk/version.json by scripts/sdk-build.mjs (same as the PyPI package "yapin").
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 VERSION = __version__
 
 BASE = "https://bots.yapper.website/api/bot/v1"
@@ -184,6 +157,39 @@ class Message(Data):
         return f"<@{self.author_id}>"
 
 
+class CommandMessage(Message):
+    """A slash command picked from the / menu (a command event, flag bot_slash_interactions): nothing was posted in
+    chat. Same fields as a command message (command, args, argv, author_id, author, channel_id, content "/roll 2d6") plus
+    interaction=True. reply / say answer it (shown with "<user> used /cmd" above), ephemeral only to them, ack: "got it"."""
+
+    def _answer(self, kind, content=None, embeds=None, components=None):
+        out = self._bot.respond(self, kind, content=content, embeds=embeds, components=components)
+        return (out or {}).get("message") if isinstance(out, dict) else out
+
+    def reply(self, content="", embeds=None, components=None, files=None):
+        """Answer the command (a new message). files=[...] goes as a normal message, like bot.send."""
+        if files:
+            return self._bot.send(self.channel_id, content, embeds=embeds, components=components, files=files)
+        return self._answer("reply", content, embeds, components)
+
+    def say(self, content="", embeds=None, components=None):
+        """Same as reply."""
+        return self._answer("reply", content, embeds, components)
+
+    def ephemeral(self, content="", embeds=None):
+        """Only the person who used the command sees it."""
+        return self._answer("ephemeral", content, embeds)
+
+    def ack(self):
+        """Just "got it", no message."""
+        return self._answer("ack")
+
+    def show_modal(self, modal):
+        """Open a form for the person who used the command (a Modal, flag bot_modals). Only as the first answer.
+        It comes back to on_modal with i.values."""
+        return self._bot.respond(self, "modal", modal=modal)
+
+
 class Interaction(Data):
     """A button click: i.custom_id, i.user_id, i.username, and i.reply / i.ephemeral / i.update / i.ack.
     Answer within 3 seconds or the person sees "This interaction failed"."""
@@ -206,6 +212,10 @@ class Interaction(Data):
     def ack(self):
         """Just say "got it", so no error shows."""
         return self._answer("ack")
+
+    def show_modal(self, modal):
+        """Open a form for the person (a Modal). Only as the first answer, not to a modal_submit. Flag bot_modals."""
+        return self._bot.respond(self, "modal", modal=modal)
 
     @property
     def user_mention(self):
@@ -464,8 +474,8 @@ class Button:
         return self
 
     def emoji(self, e):
-        """One emoji: "🔥" or a server emoji "<:name:id>"."""
-        self.data["emoji"] = str(e)
+        """One emoji: "🔥", a server emoji "<:name:id>" or {"id", "name", "animated"}."""
+        self.data["emoji"] = dict(e) if isinstance(e, dict) else str(e)
         return self
 
     def id(self, custom_id):
@@ -486,8 +496,129 @@ class Button:
         return dict(self.data)
 
 
+class Select:
+    """A select menu (dropdown), alone in its row: Row(Select("food").option("Pizza", "pizza").option("Taco", "taco")).
+    Picks come to on_select with i.values. Up to 25 options; min/max picks default to 1. In a Modal give it a label.
+    In testing (flag bot_selects)."""
+
+    def __init__(self, custom_id, options=None):
+        self.data = {"type": "select", "custom_id": str(custom_id), "options": [_plain(o) for o in (options or [])]}
+
+    def option(self, label, value=None, description=None, emoji=None, default=False):
+        """One choice: label shown, value sent back."""
+        o = {"label": str(label), "value": str(label if value is None else value)}
+        if description:
+            o["description"] = str(description)
+        if emoji:
+            o["emoji"] = dict(emoji) if isinstance(emoji, dict) else str(emoji)
+        if default:
+            o["default"] = True
+        self.data["options"].append(o)
+        return self
+
+    def placeholder(self, t):
+        self.data["placeholder"] = str(t)
+        return self
+
+    def min(self, n):
+        """Fewest picks (0 to 25)."""
+        self.data["min_values"] = n
+        return self
+
+    def max(self, n):
+        """Most picks (1 to 25)."""
+        self.data["max_values"] = n
+        return self
+
+    def disabled(self, on=True):
+        self.data["disabled"] = bool(on)
+        return self
+
+    def label(self, t):
+        """In a Modal: the question above it."""
+        self.data["label"] = str(t)
+        return self
+
+    def required(self, on=True):
+        """In a Modal: must something be picked (default True)."""
+        self.data["required"] = bool(on)
+        return self
+
+    def description(self, t):
+        """In a Modal: smaller text under the label."""
+        self.data["description"] = str(t)
+        return self
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class TextInput:
+    """A text box for a Modal: TextInput.short("name", "Your name") or TextInput.paragraph("why", "Why?").
+    Answers come back in i.values[custom_id] ("" when an optional one is skipped). Up to 4000 characters."""
+
+    def __init__(self, custom_id, label, style="short"):
+        self.data = {"type": "text_input", "custom_id": str(custom_id), "label": str(label), "style": style}
+
+    @classmethod
+    def short(cls, custom_id, label):
+        return cls(custom_id, label, "short")
+
+    @classmethod
+    def paragraph(cls, custom_id, label):
+        return cls(custom_id, label, "paragraph")
+
+    def required(self, on=True):
+        """Must be filled in (default True)."""
+        self.data["required"] = bool(on)
+        return self
+
+    def length(self, min=None, max=None):
+        """Fewest and most characters."""
+        if min is not None:
+            self.data["min_length"] = min
+        if max is not None:
+            self.data["max_length"] = max
+        return self
+
+    def value(self, v):
+        """Filled in already."""
+        self.data["value"] = str(v)
+        return self
+
+    def placeholder(self, t):
+        self.data["placeholder"] = str(t)
+        return self
+
+    def description(self, t):
+        """Smaller text under the label."""
+        self.data["description"] = str(t)
+        return self
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class Modal:
+    """A form that pops up for the person: i.show_modal(Modal("apply", "Apply", TextInput.paragraph("why", "Why?"))).
+    Up to 5 inputs (TextInput, or Select with a label). It comes back to on_modal("apply") with i.values.
+    Only as the first answer to a click, a pick or a /command (msg.show_modal). In testing (flag bot_modals)."""
+
+    def __init__(self, custom_id, title, *inputs):
+        self.custom_id = str(custom_id)
+        self.title = str(title)
+        self.inputs = _flat(inputs)
+
+    def add(self, *inputs):
+        self.inputs += _flat(inputs)
+        return self
+
+    def to_dict(self):
+        return {"custom_id": self.custom_id, "title": self.title, "components": _plain(self.inputs)}
+
+
 class Row:
-    """A row of up to 5 buttons. Works under a normal message and inside a Components V2 layout."""
+    """A row of up to 5 buttons, or one Select. Works under a normal message and inside a Components V2 layout."""
 
     def __init__(self, *buttons):
         self.buttons = _flat(buttons)
@@ -724,6 +855,7 @@ class _WebSocket:
         path = (u.path or "/") + (f"?{u.query}" if u.query else "")
         self._buf = b""
         self._frag = None   # [opcode, bytearray] of a message still arriving in pieces
+        self._send_lock = threading.Lock()
         self.sock = socket.create_connection((u.hostname, port), timeout=timeout)
         try:
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -770,6 +902,11 @@ class _WebSocket:
         return out
 
     def _frame(self, opcode, payload=b""):
+        # One frame at a time: set_status may send from a handler thread while the loop sends a heartbeat.
+        with self._send_lock:
+            self._frame_unlocked(opcode, payload)
+
+    def _frame_unlocked(self, opcode, payload=b""):
         n = len(payload)
         if n < 126:
             head = bytes([0x80 | opcode, 0x80 | n])
@@ -958,6 +1095,24 @@ class Bot:
         def deco(f):
             label = custom_id.pattern if isinstance(custom_id, re.Pattern) else custom_id
             self._add_button({"match": custom_id, "fn": f, "label": label})
+            return f
+        return deco(fn) if fn else deco
+
+    def on_select(self, custom_id, fn=None):
+        """Handle picks in your select menus with this custom_id (string or regex): i.values is the list of picked
+        values. Answer like a click, or open a form with i.show_modal(modal). In testing (flag bot_selects)."""
+        def deco(f):
+            label = custom_id.pattern if isinstance(custom_id, re.Pattern) else custom_id
+            self._add_button({"match": custom_id, "fn": f, "label": label, "kind": "select"})
+            return f
+        return deco(fn) if fn else deco
+
+    def on_modal(self, custom_id, fn=None):
+        """Handle your modals being sent back, by the modal's custom_id (string or regex): i.values maps each input's
+        custom_id to its answer (text, or a list for a select menu). In testing (flag bot_modals)."""
+        def deco(f):
+            label = custom_id.pattern if isinstance(custom_id, re.Pattern) else custom_id
+            self._add_button({"match": custom_id, "fn": f, "label": label, "kind": "modal_submit"})
             return f
         return deco(fn) if fn else deco
 
@@ -1364,9 +1519,14 @@ class Bot:
         return [Data(r) for r in self.api("GET", f"/channels/{channel_id}/messages/{message_id}/reactions")["reactions"]]
 
     # API reference: https://www.yapin.gg/developers/api/interactions#post-interactions-id-token-callback
-    def respond(self, interaction, kind, content=None, embeds=None, components=None, layout=None):
-        """Answer a button click: kind is reply, ephemeral, update or ack. layout=[...]: a Components V2 layout."""
+    def respond(self, interaction, kind, content=None, embeds=None, components=None, layout=None, modal=None):
+        """Answer a click, a pick, a modal or a /command: kind is reply, ephemeral, update, ack or modal
+        (modal=Modal(...), only as the first answer). layout=[...]: a Components V2 layout."""
+        if not interaction or not interaction.get("id") or not interaction.get("token"):
+            raise YapperError("Nothing to answer: this needs an interaction (a click, a pick, a modal or a command event)")
         body = {"type": kind}
+        if modal is not None:
+            body["modal"] = _plain(modal)
         if content is not None:
             body["content"] = str(content)
         if embeds is not None:
@@ -1497,6 +1657,33 @@ class Bot:
     # API reference: https://www.yapin.gg/developers/api/emojis#delete-servers-id-emojis-eid
     def delete_emoji(self, server_id, emoji_id):
         return self.api("DELETE", f"/servers/{server_id}/emojis/{emoji_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/emojis#get-channels-id-messages-mid-emojis
+    def message_emojis(self, channel_id, message_id):
+        """The custom emojis in one message (text, embeds, buttons, reactions), from any server:
+        [{id, name, animated, url, in_server, text}]. For steal emoji commands. Read Message History;
+        in testing (flag bot_emoji_lookup)."""
+        out = self.api("GET", f"/channels/{channel_id}/messages/{message_id}/emojis")
+        return [Data(e) for e in (out.get("emojis") or [])]
+
+    def steal_emoji(self, server_id, emoji, name=None):
+        """Copy an emoji from message_emojis() into a server (the bot needs Manage Emoji there): downloads its
+        picture and adds it like create_emoji, under name (default: its own). Returns the new emoji, or None when it
+        waits for a moderator.
+            @bot.command("steal", "Copy an emoji")
+            def steal(msg):
+                found = bot.message_emojis(msg.channel_id, msg.reply_to_id or msg.id)
+                if not found:
+                    return msg.reply("No custom emoji there")
+                added = bot.steal_emoji(msg.server_id, found[0], msg.argv[0] if msg.argv else None)
+                msg.reply(f"Added {added.name}" if added else "Sent for a check")"""
+        url = emoji.get("url") if isinstance(emoji, dict) else None
+        if not url:
+            raise YapperError("steal_emoji needs an emoji from message_emojis()")
+        req = urllib.request.Request(url, headers={"User-Agent": "yapper-py"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read(1024 * 1024 + 1)
+        return self.create_emoji(server_id, name or emoji.get("name"), data)
 
     # API reference: https://www.yapin.gg/developers/api/roles#patch-servers-id-roles-everyone
     def set_everyone_perms(self, server_id, permissions):
@@ -1724,7 +1911,15 @@ class Bot:
 
     # API reference: https://www.yapin.gg/developers/api/bot#put-me-status
     def set_status(self, status="online", activity=None):
-        return self.api("PUT", "/me/status", {"status": status, "activity": activity})
+        out = self.api("PUT", "/me/status", {"status": status, "activity": activity})
+        # Connected to the gateway: tell it too, so the dot and activity change there at once.
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.send({"op": "presence", "status": status, "activity": activity})
+            except (OSError, ValueError):
+                pass
+        return out
 
     # API reference: https://www.yapin.gg/developers/api/bot#patch-me
     def set_profile(self, display_name=None, bio=None):
@@ -1807,6 +2002,15 @@ class Bot:
         """A message event's dict -> a Message with reply / say / author_mention (handle() does it for you)."""
         return Message.of(data, self)
 
+    def wrap_command(self, data):
+        """A command event's dict -> a CommandMessage (handle() does it for you)."""
+        args = data.get("args") if isinstance(data.get("args"), str) else ""
+        d = dict(data)
+        d.update(interaction=True, command=data.get("command"), args=args, argv=args.split() if args else [],
+                 author_id=data.get("user_id"), author=data.get("username"), author_bot=False, mentioned=True,
+                 content="/" + str(data.get("command") or "") + (" " + args if args else ""))
+        return CommandMessage.of(d, self)
+
     def wrap_interaction(self, data):
         """A button click's dict -> an Interaction with reply / ephemeral / update / ack / user_mention."""
         return Interaction.of(data, self)
@@ -1858,11 +2062,35 @@ class Bot:
                         self._fail(e, c["owner"], "/" + name)
                     self._emit("command", msg)
             self._emit("message", msg)
+        elif kind == "command":
+            # A slash command picked from the / menu: nothing was posted in chat; msg.reply answers it.
+            msg = self.wrap_command(data)
+            c = self.commands.get(msg.command)
+            if not c:
+                try:
+                    self.respond(data, "ephemeral", content=f"/{msg.command} isn't a command of this bot anymore")
+                except Exception:
+                    pass
+                return
+            ok = True
+            if c["check"]:
+                try:
+                    ok = c["check"](msg) is not False
+                except Exception as e:
+                    ok = False
+                    self._fail(e, c["owner"], "check")
+            if ok:
+                try:
+                    c["fn"](msg)
+                except Exception as e:
+                    self._fail(e, c["owner"], "/" + msg.command)
+                self._emit("command", msg)
         elif kind == "interaction":
             i = self.wrap_interaction(data)
             cid = str(data.get("custom_id") or "")
+            kind_of = data.get("type") if data.get("type") in ("select", "modal_submit") else "button"
             for b in list(self._buttons):
-                if self._button_hit(b, cid):
+                if b.get("kind", "button") == kind_of and self._button_hit(b, cid):
                     try:
                         b["fn"](i)
                     except Exception as e:
@@ -1885,7 +2113,9 @@ class Bot:
         """Send the command list to Yapin’ (run() does it, and again after cogs change)."""
         self._dirty = False
         cmds = [{"name": n, "description": c["description"]} for n, c in self.commands.items()]
-        self.api("PUT", "/commands", {"commands": cmds})
+        # interactions: commands picked from the / menu come as command events (nothing posted in chat) and msg.reply
+        # answers them, with "<user> used /cmd" above the answer. Typed "!cmd" still comes as a message.
+        self.api("PUT", "/commands", {"commands": cmds, "interactions": True})
         return cmds
 
     # API reference: https://www.yapin.gg/developers/api/events#get-events

@@ -1,4 +1,5 @@
-"""Yapin’ bot library for Python. One file, standard library only, Python 3.9+.
+"""Yapin’ bot library for Python. One file, Python 3.9+, no required packages (python-dotenv, if it is installed,
+loads a .env file with YAPPER_BOT_TOKEN=yb_... for you).
 
     import yapper
 
@@ -48,6 +49,36 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+def _load_dotenv():
+    """Read a .env file (YAPPER_BOT_TOKEN=yb_...) when python-dotenv is installed (pip installs it with this package;
+    used as one loose file it is optional). Looks in the folder of the script you ran, then the current folder, and
+    in each parent folder, and uses the first one it finds. Variables already set in the environment win."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    starts = []
+    if sys.argv and sys.argv[0]:
+        starts.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    starts.append(os.getcwd())
+    seen = set()
+    for folder in starts:
+        while True:
+            path = os.path.join(folder, ".env")
+            if path not in seen:
+                seen.add(path)
+                if os.path.isfile(path):
+                    load_dotenv(path)
+                    return
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                break
+            folder = parent
+
+
+_load_dotenv()
 
 __all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button",
            "Embed", "Button", "Row", "TextDisplay", "Thumbnail", "Section", "MediaGallery", "Separator", "FileComponent",

@@ -12,11 +12,16 @@
     def welcome(ev):
         print(ev.username, "joined")
 
+    @bot.command("vote", "Pizza?")
+    def vote(msg):
+        msg.reply(embeds=yapper.Embed().title("Pizza tonight?").color("blue"),
+                  components=yapper.Row(yapper.Button.success("Yes", "vote:yes"), yapper.Button.danger("No", "vote:no")))
+
     @bot.button("vote:")                   # clicks on buttons whose custom_id starts with "vote:"
-    def vote(i):
+    def voted(i):                          # (bot.on_button("ping") for one exact custom_id, or a re.compile pattern)
         i.ephemeral("You picked " + i.custom_id[5:])
 
-    bot.load_extensions("cogs")            # optional: every cogs/*.py (see Cog below)
+    bot.load_cogs("cogs")                  # optional: every cogs/*.py (see Cog below)
     bot.run()
 
 Save this file next to your bot and run it with `python bot.py`. Nothing to install, nothing to host:
@@ -37,25 +42,71 @@ import socket
 import ssl
 import struct
 import sys
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from dotenv import load_dotenv
 
-load_dotenv()
-
-__all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button"]
-__version__ = "1.2"
+__all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button",
+           "Embed", "Button", "Row", "TextDisplay", "Thumbnail", "Section", "MediaGallery", "Separator", "FileComponent",
+           "Container", "IS_COMPONENTS_V2", "text", "thumbnail", "section", "media", "gallery", "separator", "file_display",
+           "container", "Message", "Interaction", "Data", "VERSION"]
+# Stamped from public/sdk/version.json by scripts/sdk-build.mjs (same as the PyPI package "yapin").
+__version__ = "1.5.0"
+VERSION = __version__
 
 BASE = "https://bots.yapper.website/api/bot/v1"
 # The website's address for the same API: used for 10 minutes when BASE can't be reached.
 FALLBACK_BASE = "https://www.yapin.gg/api/bot/v1"
 GATEWAY = "wss://rt.yapper.website/bot"
 COMMAND_LIMIT = 100
-EVENTS = ("message", "command", "member_join", "member_leave", "reaction_add", "reaction_remove",
-          "voice_join", "voice_leave", "interaction", "test", "ready", "error")
+EVENTS = ("message", "command", "dm_message", "member_join", "member_leave", "reaction_add", "reaction_remove",
+          "voice_join", "voice_leave", "invite_create", "invite_delete", "interaction", "test", "ready", "error")
+
+
+class _Form:
+    """A multipart body for Bot.api (send with files)."""
+
+    def __init__(self, data, content_type):
+        self.data = data
+        self.content_type = content_type
+
+
+def _file_part(f):
+    """(name, bytes) for one file: a path, an open binary file, or a (name, bytes) pair."""
+    if isinstance(f, str):
+        with open(f, "rb") as fh:
+            return os.path.basename(f), fh.read()
+    if isinstance(f, (tuple, list)) and len(f) == 2:
+        name, data = f
+        return str(name), data.read() if hasattr(data, "read") else bytes(data)
+    if hasattr(f, "read"):
+        return os.path.basename(str(getattr(f, "name", "") or "file")), f.read()
+    raise ValueError('A file is a path, an open binary file, or ("card.png", bytes)')
+
+
+def _form(body, files):
+    """multipart/form-data: the JSON body in payload_json, the files in files[0], files[1]..."""
+    files = list(files) if isinstance(files, (list, tuple)) and not (len(files) == 2 and isinstance(files[0], str) and isinstance(files[1], (bytes, bytearray))) else [files]
+    if len(files) > 4:
+        raise ValueError("Up to 4 files per message")
+    boundary = "yapper" + os.urandom(12).hex()
+    out = bytearray()
+
+    def part(headers, data):
+        out.extend(f"--{boundary}\r\n{headers}\r\n\r\n".encode())
+        out.extend(data)
+        out.extend(b"\r\n")
+
+    part('Content-Disposition: form-data; name="payload_json"\r\nContent-Type: application/json', json.dumps(body).encode())
+    for i, f in enumerate(files):
+        name, data = _file_part(f)
+        safe = re.sub(r'["\r\n\\]', "_", name) or "file"
+        part(f'Content-Disposition: form-data; name="files[{i}]"; filename="{safe}"\r\nContent-Type: application/octet-stream', data)
+    out.extend(f"--{boundary}--\r\n".encode())
+    return _Form(bytes(out), f"multipart/form-data; boundary={boundary}")
 
 
 class YapperError(RuntimeError):
@@ -89,9 +140,9 @@ class Message(Data):
     """A message event with helpers: msg.reply(text), msg.say(text), msg.author_mention.
     Commands also have msg.command, msg.args (the rest of the line) and msg.argv (split on spaces)."""
 
-    def reply(self, content="", embeds=None, components=None):
-        """Reply to this message (quoted)."""
-        return self._bot.send(self.channel_id, content, embeds=embeds, components=components, reply_to=self.id)
+    def reply(self, content="", embeds=None, components=None, files=None):
+        """Reply to this message (quoted). files=[...] like bot.send."""
+        return self._bot.send(self.channel_id, content, embeds=embeds, components=components, reply_to=self.id, files=files)
 
     def say(self, content="", embeds=None, components=None):
         """Post in the same channel without quoting."""
@@ -128,6 +179,57 @@ class Interaction(Data):
     @property
     def user_mention(self):
         return f"<@{self.user_id}>"
+
+
+class Webhook(Data):
+    """A webhook the bot can post through: hook.send("hi", username="Alice", avatar_url="https://i.imgur.com/x.png"),
+    hook.delete(). hook.token and hook.url only come with create_webhook; the bot token is enough to post."""
+
+    def send(self, content="", username=None, avatar_url=None, embeds=None, components=None, allowed_mentions=None):
+        """Post as this webhook with its own name and picture for this message. Returns the message."""
+        return self._bot.send_webhook(self.id, content, username=username, avatar_url=avatar_url, embeds=embeds,
+                                      components=components, allowed_mentions=allowed_mentions)
+
+    def delete(self):
+        """Delete it (its old messages stay)."""
+        return self._bot.delete_webhook(self.id)
+
+
+def _newer(a, b):
+    """a > b for "1.10.0" style versions."""
+    def parts(v):
+        out = []
+        for x in str(v).split(".")[:3]:
+            try:
+                out.append(int(x))
+            except ValueError:
+                out.append(0)
+        return out + [0] * (3 - len(out))
+    return parts(a) > parts(b)
+
+
+_version_checked = False
+
+
+def _check_version(base, log):
+    """Once per process: one line when the server knows a newer SDK (GET /version, no token). Runs in the
+    background and never raises. YAPPER_NO_UPDATE_CHECK=1 (or log=False) turns it off."""
+    global _version_checked
+    if _version_checked or not log or os.environ.get("YAPPER_NO_UPDATE_CHECK"):
+        return
+    _version_checked = True
+
+    def check():
+        try:
+            req = urllib.request.Request(base + "/version", headers={"User-Agent": f"yapper-py/{__version__}"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                latest = (json.loads(r.read().decode() or "{}").get("sdk") or {}).get("python")
+            if isinstance(latest, str) and _newer(latest, __version__):
+                print(f"[yapper] SDK {__version__} is behind the latest {latest}: pip install -U yapin, "
+                      "or download https://www.yapin.gg/sdk/yapper.py again", file=sys.stderr)
+        except Exception:
+            pass  # offline or an older server: no warning
+    threading.Thread(target=check, daemon=True).start()
 
 
 def row(*buttons):
@@ -202,6 +304,287 @@ def container(*components, accent=None, spoiler=False):
     if spoiler:
         c["spoiler"] = True
     return c
+
+
+def _color(c):
+    """'#5865f2', 0x5865f2 or a name like "blue" -> the number."""
+    if isinstance(c, int):
+        return c
+    return _COLORS.get(str(c).lower()) or int(str(c).lstrip("#"), 16)
+
+
+def _plain(x):
+    """Builders (Embed, Button, Row, Container ...) -> plain dicts, inside lists and dicts too, so they can be sent."""
+    if hasattr(x, "to_dict"):
+        return _plain(x.to_dict())
+    if isinstance(x, dict):
+        return {k: _plain(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_plain(v) for v in x]
+    return x
+
+
+def _listed(v):
+    """One item or a list -> a plain list (None stays None)."""
+    if v is None:
+        return None
+    return _plain(v if isinstance(v, (list, tuple)) else [v])
+
+
+# ---- builders: the same as the JS SDK's classes. Plain dicts (row(), btn(), container() ...) still work too. ----
+
+class Embed:
+    """Builds an embed card. Every setter returns the embed, so they chain:
+
+        yapper.Embed().title("Score").description("**3** wins").color("green") \\
+            .field("Kills", "12", True).field("Deaths", "4", True).thumbnail(url).footer("Season 2").timestamp()
+
+    Pictures must be https links to Yapin’ uploads or common image hosts (full list on /developers).
+    Limits: title 256, description 4096, 10 fields (name 256, value 1024), 6000 characters in all."""
+
+    def __init__(self, data=None, **kwargs):
+        self.data = dict(data or {}, **kwargs)
+
+    def title(self, t):
+        self.data["title"] = str(t)
+        return self
+
+    def description(self, t):
+        self.data["description"] = str(t)
+        return self
+
+    def url(self, u):
+        self.data["url"] = str(u)
+        return self
+
+    def color(self, c):
+        """'#5865f2', 0x5865f2 or 'red' | 'green' | 'blue' | 'yellow' | 'purple' | 'orange' | 'grey'."""
+        self.data["color"] = _color(c)
+        return self
+
+    def field(self, name, value, inline=False):
+        self.data.setdefault("fields", []).append({"name": str(name), "value": str(value), "inline": bool(inline)})
+        return self
+
+    def author(self, name, url=None, icon=None):
+        self.data["author"] = _clean({"name": str(name), "url": url, "icon_url": icon})
+        return self
+
+    def footer(self, text, icon=None):
+        self.data["footer"] = _clean({"text": str(text), "icon_url": icon})
+        return self
+
+    def thumbnail(self, url):
+        self.data["thumbnail"] = {"url": str(url)}
+        return self
+
+    def image(self, url):
+        self.data["image"] = {"url": str(url)}
+        return self
+
+    def timestamp(self, t=None):
+        """A datetime, a unix time in seconds or an ISO string; now when left out."""
+        import datetime
+        if t is None:
+            t = datetime.datetime.now(datetime.timezone.utc)
+        elif isinstance(t, (int, float)):
+            t = datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+        self.data["timestamp"] = t.isoformat() if hasattr(t, "isoformat") else str(t)
+        return self
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class Button:
+    """A button for `components`. Shortcuts: Button.primary(label, custom_id), .secondary, .success, .danger,
+    Button.link(label, url). Row(Button.success("Yes", "vote:yes"), Button.danger("No", "vote:no")).
+    Limits: 5 rows of 5 buttons, label 80, custom_id 100 (each one different), link urls https only."""
+
+    def __init__(self, data=None, **kwargs):
+        self.data = {"type": "button", "style": "secondary", **(data or {}), **kwargs}
+
+    @classmethod
+    def primary(cls, label, custom_id):
+        return cls(style="primary", label=label, custom_id=custom_id)
+
+    @classmethod
+    def secondary(cls, label, custom_id):
+        return cls(style="secondary", label=label, custom_id=custom_id)
+
+    @classmethod
+    def success(cls, label, custom_id):
+        return cls(style="success", label=label, custom_id=custom_id)
+
+    @classmethod
+    def danger(cls, label, custom_id):
+        return cls(style="danger", label=label, custom_id=custom_id)
+
+    @classmethod
+    def link(cls, label, url):
+        return cls(style="link", label=label, url=url)
+
+    def style(self, s):
+        self.data["style"] = s
+        return self
+
+    def label(self, t):
+        self.data["label"] = str(t)
+        return self
+
+    def emoji(self, e):
+        """One emoji: "🔥" or a server emoji "<:name:id>"."""
+        self.data["emoji"] = str(e)
+        return self
+
+    def id(self, custom_id):
+        self.data["custom_id"] = str(custom_id)
+        return self
+
+    def url(self, u):
+        self.data["style"] = "link"
+        self.data["url"] = str(u)
+        self.data.pop("custom_id", None)
+        return self
+
+    def disabled(self, on=True):
+        self.data["disabled"] = bool(on)
+        return self
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class Row:
+    """A row of up to 5 buttons. Works under a normal message and inside a Components V2 layout."""
+
+    def __init__(self, *buttons):
+        self.buttons = _flat(buttons)
+
+    def add(self, *buttons):
+        self.buttons += _flat(buttons)
+        return self
+
+    def to_dict(self):
+        return {"type": "row", "components": _plain(self.buttons)}
+
+
+def _flat(items):
+    out = []
+    for x in items:
+        out.extend(x if isinstance(x, (list, tuple)) else [x])
+    return out
+
+
+def _text_of(t):
+    return t if isinstance(t, (TextDisplay, dict)) else TextDisplay(t)
+
+
+class TextDisplay:
+    """Markdown text (type 10). Mentions, links and emoji work like in messages; no HTML."""
+
+    def __init__(self, content):
+        self.content = str(content)
+
+    def to_dict(self):
+        return text(self.content)
+
+
+class Thumbnail:
+    """A small picture (type 11), only as a Section's accessory."""
+
+    def __init__(self, url, description=None, spoiler=False):
+        self.data = thumbnail(url, description, spoiler)
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class Section:
+    """1 to 3 lines of text with a button or a thumbnail beside them (type 9)."""
+
+    def __init__(self, *texts):
+        self.texts = [_text_of(t) for t in _flat(texts)]
+        self.side = None
+
+    def text(self, t):
+        self.texts.append(_text_of(t))
+        return self
+
+    def accessory(self, a):
+        """A Button, or a Thumbnail (or just a picture url)."""
+        self.side = Thumbnail(a) if isinstance(a, str) else a
+        return self
+
+    def to_dict(self):
+        return {"type": 9, "components": _plain(self.texts), "accessory": _plain(self.side)}
+
+
+class MediaGallery:
+    """1 to 10 pictures or videos in a grid (type 12)."""
+
+    def __init__(self, *urls):
+        self.items = []
+        for u in _flat(urls):
+            self.add(u)
+
+    def add(self, url, description=None, spoiler=False):
+        self.items.append(media(url, description, spoiler))
+        return self
+
+    def to_dict(self):
+        return {"type": 12, "items": list(self.items)}
+
+
+class Separator:
+    """A line or empty space (type 14): Separator(divider=False, spacing="large")."""
+
+    def __init__(self, divider=True, spacing="small"):
+        self.data = separator(divider, spacing)
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class FileComponent:
+    """A file to download (type 13): an https link to a Yapin’ upload or an allowed host."""
+
+    def __init__(self, url, spoiler=False):
+        self.data = file_display(url, spoiler)
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class Container:
+    """A card holding other components (type 17), with an optional accent colour bar and spoiler.
+    Plain strings become text displays."""
+
+    def __init__(self, *components):
+        self.parts = _flat(components)
+        self.data = {"type": 17}
+
+    def accent(self, c):
+        """'#5865f2', 0x5865f2 or 'red' | 'green' | 'blue' | 'yellow' | 'purple' | 'orange' | 'grey'."""
+        self.data["accent_color"] = _color(c)
+        return self
+
+    def spoiler(self, on=True):
+        self.data["spoiler"] = bool(on)
+        return self
+
+    def add(self, *components):
+        self.parts += _flat(components)
+        return self
+
+    def text(self, t):
+        return self.add(_text_of(t))
+
+    def separator(self, divider=True, spacing="small"):
+        return self.add(Separator(divider, spacing))
+
+    def to_dict(self):
+        return {**self.data, "components": [_plain(text(p) if isinstance(p, str) else p) for p in self.parts]}
 
 
 # ---- decorators for cogs (on a Cog's methods) ----
@@ -441,6 +824,10 @@ class Bot:
         self._fallback_until = 0
         self.prefixes = tuple(prefixes)
         self.log = log
+        # Most seconds one call spends waiting out 429s / "busy" 503s in total before it raises (three 10 s waits with
+        # 50% jitter used to hold an edit for up to 45 s). Set bot.max_retry_wait to change it.
+        self.max_retry_wait = 30.0
+        self._cf_warned = False
         self.ignore_bots = ignore_bots
         self.gateway = gateway or None
         self._ws = None
@@ -485,13 +872,38 @@ class Bot:
 
     def on(self, event, fn=None):
         """Listen for an event: bot.on("member_join", fn), or as a decorator @bot.on("member_join").
-        Events: message, command, member_join, member_leave, reaction_add, reaction_remove, voice_join,
-        voice_leave, interaction, test, ready, error."""
+        Events: message, command, dm_message, member_join, member_leave, reaction_add, reaction_remove, voice_join,
+        voice_leave, invite_create, invite_delete, interaction, test, ready, error.
+        member_join also has invite_code and inviter_id when known (bots with Manage Server).
+        dm_message is someone DMing the bot: a Message whose reply / say answer in the DM, with msg.dm = True."""
         def deco(f):
             self._listeners.setdefault(event, []).append(f)
             owner = self._loading[-1] if self._loading else None
             if owner:
                 owner.listeners.append((event, f))
+            return f
+        return deco(fn) if fn else deco
+
+    def on_dm(self, fn=None):
+        """Someone DMed the bot: bot.on_dm(fn), or as a decorator @bot.on_dm. msg has id, channel_id (the DM),
+        author_id, author, content, attachment / attachments, reply_to_id, created_at, is_dm (True), dm_channel_id,
+        and msg.reply("hi!").
+        Only DMs with this bot ever come in. Same as bot.on("dm_message")."""
+        return self.on("dm_message", fn)
+
+    def on_reaction_on_mine(self, fn=None):
+        """Someone reacted to a message this bot sent (in a server channel it can see, or in its DMs), or took it off:
+        bot.on_reaction_on_mine(fn), or @bot.on_reaction_on_mine. r has message_id, channel_id, server_id (None in a DM),
+        user_id, username, emoji, added (True for reaction_add, False for reaction_remove) and type."""
+        def deco(f):
+            def mine(ev):
+                me = (self.me or {}).get("id")
+                if me and ev.get("message_author_id") == me:
+                    return f(Data(ev, added=ev.get("type") == "reaction_add"))
+                return None
+            mine.__name__ = getattr(f, "__name__", "on_reaction_on_mine")
+            self.on("reaction_add", mine)
+            self.on("reaction_remove", mine)
             return f
         return deco(fn) if fn else deco
 
@@ -503,13 +915,34 @@ class Bot:
     def button(self, prefix):
         """Decorator for button clicks whose custom_id starts with `prefix`: @bot.button("vote:")."""
         def deco(fn):
-            owner = self._loading[-1] if self._loading else None
-            entry = {"prefix": prefix, "fn": fn, "owner": owner}
-            self._buttons.append(entry)
-            if owner:
-                owner.buttons.append(entry)
+            self._add_button({"prefix": prefix, "fn": fn, "label": prefix})
             return fn
         return deco
+
+    def on_button(self, custom_id, fn=None):
+        """Handle clicks on buttons with exactly this custom_id, or matching a regex (re.compile(r"^vote:")):
+        bot.on_button("ping", fn), or as a decorator @bot.on_button(re.compile(r"^vote:")).
+        `fn(i)` gets the click: i.custom_id, i.user_id, i.username, i.message_id, i.channel_id and
+        i.reply(...) / i.ephemeral(...) / i.update(...) / i.ack(). Answer within 3 seconds; then you have 15 minutes."""
+        def deco(f):
+            label = custom_id.pattern if isinstance(custom_id, re.Pattern) else custom_id
+            self._add_button({"match": custom_id, "fn": f, "label": label})
+            return f
+        return deco(fn) if fn else deco
+
+    def _add_button(self, entry):
+        owner = self._loading[-1] if self._loading else None
+        entry["owner"] = owner
+        self._buttons.append(entry)
+        if owner:
+            owner.buttons.append(entry)
+
+    @staticmethod
+    def _button_hit(b, cid):
+        if "prefix" in b:
+            return cid.startswith(b["prefix"])
+        m = b["match"]
+        return bool(m.search(cid)) if isinstance(m, re.Pattern) else m == cid
 
     # ---- cogs and extensions ----
 
@@ -548,7 +981,7 @@ class Bot:
                         self._listeners.setdefault(ev, []).append(fn)
                         owner.listeners.append((ev, fn))
                     if hasattr(raw, "__yapper_button__"):
-                        entry = {"prefix": raw.__yapper_button__, "fn": fn, "owner": owner}
+                        entry = {"prefix": raw.__yapper_button__, "fn": fn, "owner": owner, "label": raw.__yapper_button__}
                         self._buttons.append(entry)
                         owner.buttons.append(entry)
             cog.cog_load()
@@ -650,6 +1083,56 @@ class Bot:
             raise
         return name
 
+    # Short names, like the JS SDK's bot.load / loadCogs / unload / reload.
+
+    def load(self, path):
+        """Load a cog file: bot.load("cogs/fun.py") or bot.load("cogs.fun"). Same as load_extension. Returns its name."""
+        return self.load_extension(path)
+
+    def load_cogs(self, folder="cogs"):
+        """Load every .py file in a folder, A to Z (files starting with _ are skipped). Same as load_extensions."""
+        return self.load_extensions(folder)
+
+    def unload(self, name):
+        """Take a cog file or a cog out again: bot.unload("fun") (or "cogs.fun", "cogs/fun.py", or a cog's name).
+        Its commands, listeners and buttons go away and cog_unload / teardown run. Returns the name."""
+        kind, key = self._find_loaded(name)
+        if kind == "ext":
+            self.unload_extension(key)
+        else:
+            self.remove_cog(key)
+        return key
+
+    def reload(self, name):
+        """Load a cog file again, fresh from disk, no restart: edit cogs/fun.py, then bot.reload("fun").
+        If the new version breaks, the old one stays and the error is raised. A cog from a file reloads its file."""
+        kind, key = self._find_loaded(name)
+        if kind == "cog":
+            ext = next((n for n, o in self._owners.items() if n in self.extensions and key in o.cogs), None)
+            if ext is None:
+                raise ValueError(f'"{key}" wasn\'t loaded from a file, so it can\'t be reloaded')
+            key = ext
+        return self.reload_extension(key)
+
+    def _find_loaded(self, name):
+        """("ext", "cogs.fun") or ("cog", "Fun") for a name as people write it: "fun", "cogs.fun", "cogs/fun.py", "Fun"."""
+        s = str(name)
+        short = re.sub(r"\.py$", "", s.replace("\\", "/").rsplit("/", 1)[-1])
+        dotted = re.sub(r"\.py$", "", s).replace("\\", "/").replace("/", ".")
+        for key in (s, dotted):
+            if key in self.extensions:
+                return "ext", key
+        if s in self.cogs:
+            return "cog", s
+        for key in self.extensions:
+            if key.rsplit(".", 1)[-1] == short:
+                return "ext", key
+        for key in self.cogs:
+            if key.lower() == short.lower():
+                return "cog", key
+        loaded = ", ".join(list(self.extensions) + [c for c in self.cogs if not any(c in o.cogs for o in self._owners.values())])
+        raise ValueError(f'No cog called "{s}" is loaded' + (f" (loaded: {loaded})" if loaded else ""))
+
     def _setup(self, name, mod):
         owner = _Owner(name, (getattr(mod, "__file__", None) and os.path.relpath(mod.__file__).replace(os.sep, "/")) or name)
         self._owners[name] = owner
@@ -693,32 +1176,36 @@ class Bot:
 
     # ---- HTTP ----
 
-    def api(self, method, path, body=None, timeout=40, retries=3):
+    def api(self, method, path, body=None, timeout=40, retries=3, _waited=0.0):
         """Raw API call: bot.api("GET", "/servers"). A 429 with Retry-After, or Yapin’s own 503 "busy",
-        is waited out and retried (nothing was done, so that's safe). Other errors raise YapperError."""
-        data = None if body is None else json.dumps(body).encode()
+        is waited out and retried, up to 3 times and max_retry_wait seconds in total (nothing was done, so that's
+        safe). Other errors raise YapperError."""
+        # A _Form (send with files) is already multipart bytes with its own content type.
+        data = None if body is None else body.data if isinstance(body, _Form) else json.dumps(body).encode()
+        ctype = body.content_type if isinstance(body, _Form) else "application/json"
         on_fallback = bool(self._fallback) and time.time() < self._fallback_until
         base = self._fallback if on_fallback else self.base
         req = urllib.request.Request(base + path, method=method, data=data, headers={
-            "Authorization": f"Bot {self.token}", "Content-Type": "application/json", "User-Agent": f"yapper-py/{__version__}"})
+            "Authorization": f"Bot {self.token}", "Content-Type": ctype, "User-Agent": f"yapper-py/{__version__}"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
-                try:
-                    return json.loads(raw) if raw else {}
-                except ValueError:
-                    raise YapperError(f"{method} {path}: the server sent something that isn't JSON (is the API address right?)", r.status) from None
+                return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             if e.code in (502, 504) and self._fallback and not on_fallback:
                 self._use_fallback(f"answered {e.code}")
                 if method == "GET" and retries > 0:
-                    return self.api(method, path, body, timeout, retries - 1)
+                    return self.api(method, path, body, timeout, retries - 1, _waited)
             try:
                 err = json.loads(e.read() or b"{}")
             except Exception:
                 err = {}
             if not isinstance(err, dict):
                 err = {}
+            if e.code == 429 and "json" not in (e.headers.get("Content-Type") or "") and not self._cf_warned:
+                # Not our JSON: Cloudflare in front of us limited this IP address, not the bot.
+                self._cf_warned = True
+                print("[yapper] Cloudflare rate limited this machine's IP address (not a Yapin' bot limit). If several bots share this IP, tell us in Yapin' HQ.")
             busy = e.code == 503 and "retry_after" in err
             wait = 0
             if e.code == 429 or busy:
@@ -726,11 +1213,12 @@ class Bot:
                     wait = float(e.headers.get("Retry-After") or err.get("retry_after") or 0)
                 except (TypeError, ValueError):
                     wait = 0
-            if 0 < wait <= 60 and retries > 0:
+            pause = wait * (1 + random.random() * 0.2)   # up to 20% jitter: bots don't all come back at once
+            if 0 < wait <= 60 and retries > 0 and _waited + pause <= self.max_retry_wait:
                 if self.log:
                     print(f"[yapper] {'busy' if busy else 'rate limited'}, retrying {method} {path} in {wait:g}s")
-                time.sleep(wait * (1 + random.random() * 0.5))
-                return self.api(method, path, body, timeout, retries - 1)
+                time.sleep(pause)
+                return self.api(method, path, body, timeout, retries - 1, _waited + pause)
             raise YapperError(err.get("error") or f"{method} {path} failed ({e.code})", e.code, wait or None) from None
         except urllib.error.URLError:
             # Our API host unreachable: the website's address for 10 minutes. A GET is asked again there at once;
@@ -739,7 +1227,7 @@ class Bot:
                 raise
             self._use_fallback("unreachable")
             if method == "GET" and retries > 0:
-                return self.api(method, path, body, timeout, retries - 1)
+                return self.api(method, path, body, timeout, retries - 1, _waited)
             raise
 
     def _use_fallback(self, why):
@@ -749,132 +1237,323 @@ class Bot:
 
     # ---- messages and more ----
 
-    def send(self, channel_id, content="", embeds=None, components=None, reply_to=None):
-        """Post a message. Embeds and buttons are plain dicts (see /developers). Returns the message."""
+    # API reference: https://www.yapin.gg/developers/api/messages#post-channels-id-messages
+    def send(self, channel_id, content="", embeds=None, components=None, reply_to=None, files=None):
+        """Post a message. Embeds and buttons are plain dicts (see /developers). Returns the message.
+        files (in testing, flag bot_uploads): up to 4, each a file path, an open binary file, or ("card.png", bytes).
+        Pictures, videos, sounds, TXT, PDF, ZIP, 10 MB each, 12 MB in all. Every file becomes its own message (the first one has
+        the text) and is checked before it shows; content can be "" then.
+        bot.send(ch, "Welcome!", files=[("welcome.png", png_bytes)])"""
         body = {"content": str(content or "")}
         if reply_to:
             body["reply_to"] = reply_to
         if embeds:
-            body["embeds"] = embeds if isinstance(embeds, list) else [embeds]
+            body["embeds"] = _listed(embeds)
         if components:
-            body["components"] = components if isinstance(components, list) else [components]
+            body["components"] = _listed(components)
+        if files:
+            body = _form(body, files)
         return Data(self.api("POST", f"/channels/{channel_id}/messages", body).get("message") or {})
 
+    # API reference: https://www.yapin.gg/developers/api/messages#post-channels-id-messages
     def send_layout(self, channel_id, components, reply_to=None):
         """Post a Components V2 message: the layout is the whole message (no content or embeds).
         bot.send_layout(ch, [container(text("# Hi"), section("Ready?", accessory=btn("Go", "go")), accent="blue")])"""
-        body = {"flags": IS_COMPONENTS_V2, "components": components if isinstance(components, list) else [components]}
+        body = {"flags": IS_COMPONENTS_V2, "components": _listed(components)}
         if reply_to:
             body["reply_to"] = reply_to
         return Data(self.api("POST", f"/channels/{channel_id}/messages", body).get("message") or {})
 
+    # API reference: https://www.yapin.gg/developers/api/messages#patch-channels-id-messages-mid
     def edit_layout(self, channel_id, message_id, components):
         """Swap the layout of one of the bot's Components V2 messages."""
-        body = {"flags": IS_COMPONENTS_V2, "components": components if isinstance(components, list) else [components]}
+        body = {"flags": IS_COMPONENTS_V2, "components": _listed(components)}
         return Data(self.api("PATCH", f"/channels/{channel_id}/messages/{message_id}", body).get("message") or {})
 
+    # API reference: https://www.yapin.gg/developers/api/messages#patch-channels-id-messages-mid
     def edit(self, channel_id, message_id, content=None, embeds=None, components=None):
+        """Edit one of the bot's own messages. Left out (None) = kept; embeds=[] / components=[] removes them."""
         body = {}
         if content is not None:
             body["content"] = str(content)
         if embeds is not None:
-            body["embeds"] = embeds
+            body["embeds"] = _listed(embeds)
         if components is not None:
-            body["components"] = components
+            body["components"] = _listed(components)
         return Data(self.api("PATCH", f"/channels/{channel_id}/messages/{message_id}", body).get("message") or {})
 
+    # API reference: https://www.yapin.gg/developers/api/messages#delete-channels-id-messages-mid
     def delete(self, channel_id, message_id):
+        """Delete a message: the bot's own, or anyone's if its roles have Manage messages."""
         return self.api("DELETE", f"/channels/{channel_id}/messages/{message_id}")
 
-    def react(self, channel_id, message_id, emoji):
-        return self.api("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{urllib.parse.quote(emoji)}")
+    def send_embed(self, channel_id, embed, content=""):
+        """Send just a card (or a list of up to 5): bot.send_embed(ch, yapper.Embed().title("Hi"))."""
+        return self.send(channel_id, content, embeds=embed)
 
+    # API reference: https://www.yapin.gg/developers/api/messages#get-channels-id-messages-mid
+    def message(self, channel_id, message_id):
+        """One message by id, with its `author` profile (None if the account is gone)."""
+        out = self.api("GET", f"/channels/{channel_id}/messages/{message_id}")
+        if not out.get("message"):
+            return Data(out)
+        return Data(out["message"], author=Data(out["author"]) if out.get("author") else None)
+
+    # API reference: https://www.yapin.gg/developers/api/messages#get-channels-id-messages
+    def messages_after(self, channel_id, after, limit=50):
+        """Messages after a time (a datetime, unix seconds or an ISO string), oldest first, each with its `author`."""
+        return self._with_authors(self.api("GET", f"/channels/{channel_id}/messages?limit={limit}&after={urllib.parse.quote(_iso(after))}"))
+
+    # API reference: https://www.yapin.gg/developers/api/messages#post-channels-id-messages-bulk-delete
+    def bulk_delete(self, channel_id, message_ids):
+        """Delete up to 100 messages at once (needs Manage messages for other people's). Returns {deleted, skipped}."""
+        return self.api("POST", f"/channels/{channel_id}/messages/bulk-delete", {"ids": list(message_ids)})
+
+    # API reference: https://www.yapin.gg/developers/api/messages#put-channels-id-messages-mid-pin
+    def pin(self, channel_id, message_id):
+        return self.api("PUT", f"/channels/{channel_id}/messages/{message_id}/pin")
+
+    # API reference: https://www.yapin.gg/developers/api/messages#delete-channels-id-messages-mid-pin
+    def unpin(self, channel_id, message_id):
+        return self.api("DELETE", f"/channels/{channel_id}/messages/{message_id}/pin")
+
+    # API reference: https://www.yapin.gg/developers/api/messages#put-channels-id-messages-mid-reactions-emoji
+    def react(self, channel_id, message_id, emoji):
+        """Add the bot's reaction: "🔥" or a server emoji "<:name:id>"."""
+        return self.api("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{urllib.parse.quote(emoji, safe='')}")
+
+    # API reference: https://www.yapin.gg/developers/api/messages#delete-channels-id-messages-mid-reactions-emoji
+    def unreact(self, channel_id, message_id, emoji):
+        """Take the bot's reaction off again."""
+        return self.api("DELETE", f"/channels/{channel_id}/messages/{message_id}/reactions/{urllib.parse.quote(emoji, safe='')}")
+
+    # API reference: https://www.yapin.gg/developers/api/messages#get-channels-id-messages-mid-reactions
+    def reactions(self, channel_id, message_id):
+        """The reactions on a message: [{emoji, count, user_ids, ...}]."""
+        return [Data(r) for r in self.api("GET", f"/channels/{channel_id}/messages/{message_id}/reactions")["reactions"]]
+
+    # API reference: https://www.yapin.gg/developers/api/interactions#post-interactions-id-token-callback
     def respond(self, interaction, kind, content=None, embeds=None, components=None, layout=None):
         """Answer a button click: kind is reply, ephemeral, update or ack. layout=[...]: a Components V2 layout."""
         body = {"type": kind}
         if content is not None:
             body["content"] = str(content)
         if embeds is not None:
-            body["embeds"] = embeds
+            body["embeds"] = _listed(embeds)
         if components is not None:
-            body["components"] = components
+            body["components"] = _listed(components)
         if layout is not None:
             body["flags"] = IS_COMPONENTS_V2
-            body["components"] = layout if isinstance(layout, list) else [layout]
+            body["components"] = _listed(layout)
         return self.api("POST", f"/interactions/{interaction['id']}/{interaction['token']}/callback", body)
 
+    # API reference: https://www.yapin.gg/developers/api/servers#get-servers
     def servers(self):
+        """Servers the bot is in (with member_count, and online_count where live counts are on)."""
         return [Data(s) for s in self.api("GET", "/servers")["servers"]]
 
+    # API reference: https://www.yapin.gg/developers/api/servers#get-servers-id
     def server(self, server_id):
+        """Server details; online_count (people online now) sits next to member_count where live counts are on."""
         return Data(self.api("GET", f"/servers/{server_id}")["server"])
 
+    # API reference: https://www.yapin.gg/developers/api/servers#get-servers-id-counts
+    def member_counts(self, server_id):
+        """Live counts for a "Members: N / Online: N" counter: {member_count, online_count}. Online is refreshed once
+        a minute, so ask every few minutes (member_join / member_leave carry member_count in between)."""
+        return Data(self.api("GET", f"/servers/{server_id}/counts"))
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-channels
+    # API reference: https://www.yapin.gg/developers/api/channels#get-servers-id-channels
     def channels(self, server_id=None, type=None):
         """Channels the bot can see, in sidebar order. channels(server_id, type="text") for text only."""
         q = f"?type={type}" if type else ""
         path = f"/servers/{server_id}/channels{q}" if server_id else f"/channels{q}"
         return [Data(c) for c in self.api("GET", path)["channels"]]
 
+    # API reference: https://www.yapin.gg/developers/api/channels#get-channels-id
     def channel(self, channel_id):
         try:
             return Data(self.api("GET", f"/channels/{channel_id}")["channel"])
         except YapperError:
             return None
 
+    # API reference: https://www.yapin.gg/developers/api/servers#get-servers-id-members
     def members(self, server_id, after=None):
         return [Data(m) for m in self.api("GET", f"/servers/{server_id}/members?limit=200" + (f"&after={after}" if after else ""))["members"]]
 
+    # API reference: https://www.yapin.gg/developers/api/servers#get-servers-id-members-uid
     def member(self, server_id, user_id):
         return Data(self.api("GET", f"/servers/{server_id}/members/{user_id}")["member"])
 
+    # API reference: https://www.yapin.gg/developers/api/roles#get-servers-id-roles
     def roles(self, server_id):
         return [Data(r) for r in self.api("GET", f"/servers/{server_id}/roles")["roles"]]
 
+    # API reference: https://www.yapin.gg/developers/api/users#get-users-id
     def user(self, user_id):
         return Data(self.api("GET", f"/users/{user_id}")["user"])
 
+    # API reference: https://www.yapin.gg/developers/api/messages#get-channels-id-messages
     def messages(self, channel_id, limit=50):
-        out = self.api("GET", f"/channels/{channel_id}/messages?limit={limit}")
-        by = {a["id"]: a for a in out.get("authors") or []}
-        return [Data(m, author=by.get(m.get("author_id"))) for m in out.get("messages") or []]
+        """Recent messages in a channel, oldest first. Each has its `author` profile ({id, username, display_name, ...})."""
+        return self._with_authors(self.api("GET", f"/channels/{channel_id}/messages?limit={limit}"))
 
+    @staticmethod
+    def _with_authors(out):
+        by = {a["id"]: a for a in out.get("authors") or []}
+        return [Data(m, author=Data(by[m["author_id"]]) if m.get("author_id") in by else None) for m in out.get("messages") or []]
+
+    # API reference: https://www.yapin.gg/developers/api/roles#put-servers-id-members-uid-roles-rid
     def add_role(self, server_id, user_id, role_id):
         return self.api("PUT", f"/servers/{server_id}/members/{user_id}/roles/{role_id}")
 
+    # API reference: https://www.yapin.gg/developers/api/roles#delete-servers-id-members-uid-roles-rid
     def remove_role(self, server_id, user_id, role_id):
         return self.api("DELETE", f"/servers/{server_id}/members/{user_id}/roles/{role_id}")
 
+    # ---- managing roles (Manage Roles; only roles below the bot's highest, only permissions the bot has itself) ----
+
+    # API reference: https://www.yapin.gg/developers/api/roles#post-servers-id-roles
+    def create_role(self, server_id, name, color=None, mentionable=False, permissions=None):
+        """Make a role, just below the bot's highest: create_role(server, "Mods", color="#5865f2",
+        permissions={"kick_members": True}). Returns the role. 30 role and permission changes a minute per bot."""
+        body = {"name": name, "mentionable": bool(mentionable)}
+        if color is not None:
+            body["color"] = color
+        if permissions is not None:
+            body["permissions"] = permissions
+        return Data(self.api("POST", f"/servers/{server_id}/roles", body).get("role") or {})
+
+    # API reference: https://www.yapin.gg/developers/api/roles#patch-servers-id-roles-rid
+    def edit_role(self, server_id, role_id, name=None, color=None, mentionable=None, permissions=None, position=None):
+        """Change a role; what you leave out stays (permissions: only the keys you pass change). color="" removes the colour."""
+        body = {k: v for k, v in (("name", name), ("color", color), ("mentionable", mentionable),
+                                  ("permissions", permissions), ("position", position)) if v is not None}
+        return Data(self.api("PATCH", f"/servers/{server_id}/roles/{role_id}", body).get("role") or {})
+
+    # API reference: https://www.yapin.gg/developers/api/roles#delete-servers-id-roles-rid
+    def delete_role(self, server_id, role_id):
+        return self.api("DELETE", f"/servers/{server_id}/roles/{role_id}")
+
+    # ---- custom emojis (Manage Emoji; 30 changes a minute per bot; in testing, flag bot_emojis) ----
+
+    # API reference: https://www.yapin.gg/developers/api/emojis#get-servers-id-emojis
+    def emojis(self, server_id):
+        """The server's custom emojis: {"emojis": [{id, name, animated, url, ...}], "limit": emoji slots}."""
+        return Data(self.api("GET", f"/servers/{server_id}/emojis"))
+
+    # API reference: https://www.yapin.gg/developers/api/emojis#post-servers-id-emojis
+    def create_emoji(self, server_id, name, image):
+        """Add a custom emoji: create_emoji(server, "party", "party.gif"). image: a file path, bytes or an open binary
+        file. PNG, GIF or WebP up to 1 MB. Checked like every new emoji. Returns the emoji, or None when the check
+        wasn't sure and it waits for a moderator."""
+        if isinstance(image, str):
+            with open(image, "rb") as f:
+                data = f.read()
+        elif hasattr(image, "read"):
+            data = image.read()
+        else:
+            data = bytes(image)
+        out = self.api("POST", f"/servers/{server_id}/emojis", {"name": name, "image": base64.b64encode(data).decode("ascii")})
+        return Data(out["emoji"]) if out.get("emoji") else None
+
+    # API reference: https://www.yapin.gg/developers/api/emojis#patch-servers-id-emojis-eid
+    def edit_emoji(self, server_id, emoji_id, name):
+        """Rename a custom emoji. Returns the emoji."""
+        return Data(self.api("PATCH", f"/servers/{server_id}/emojis/{emoji_id}", {"name": name}).get("emoji") or {})
+
+    # API reference: https://www.yapin.gg/developers/api/emojis#delete-servers-id-emojis-eid
+    def delete_emoji(self, server_id, emoji_id):
+        return self.api("DELETE", f"/servers/{server_id}/emojis/{emoji_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/roles#patch-servers-id-roles-everyone
+    def set_everyone_perms(self, server_id, permissions):
+        """@everyone's permissions (the basic ones): set_everyone_perms(server, {"send_messages": False})."""
+        return self.api("PATCH", f"/servers/{server_id}/roles/everyone", {"permissions": permissions})
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-channels-id-permissions
+    def channel_permissions(self, channel_id):
+        """A channel's permission overrides: [{role_id (None = @everyone), allow, deny}]."""
+        return [Data(o) for o in self.api("GET", f"/channels/{channel_id}/permissions")["overrides"]]
+
+    # API reference: https://www.yapin.gg/developers/api/channels#put-channels-id-permissions-role
+    def set_channel_permissions(self, channel_id, role_id, allow=(), deny=()):
+        """Allow or deny permissions for a role (or "everyone") in one channel:
+        set_channel_permissions(ch, role_id, allow=["send_messages"], deny=["view_channel"]). Empty lists remove it."""
+        return self.api("PUT", f"/channels/{channel_id}/permissions/{role_id}", {"allow": list(allow), "deny": list(deny)})
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-channels-id-permissions-role
+    def clear_channel_permissions(self, channel_id, role_id):
+        return self.api("DELETE", f"/channels/{channel_id}/permissions/{role_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/channels#put-servers-id-categories-cid-permissions-role
+    def set_category_permissions(self, server_id, category_id, role_id, allow=(), deny=()):
+        """The same for a whole category (its channels follow it unless they have their own)."""
+        return self.api("PUT", f"/servers/{server_id}/categories/{category_id}/permissions/{role_id}",
+                        {"allow": list(allow), "deny": list(deny)})
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-servers-id-categories-cid-permissions-role
+    def clear_category_permissions(self, server_id, category_id, role_id):
+        return self.api("DELETE", f"/servers/{server_id}/categories/{category_id}/permissions/{role_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/moderation#post-servers-id-kick
     def kick(self, server_id, user_id):
         return self.api("POST", f"/servers/{server_id}/kick", {"user_id": user_id})
 
+    # API reference: https://www.yapin.gg/developers/api/moderation#post-servers-id-bans
     def ban(self, server_id, user_id):
         return self.api("POST", f"/servers/{server_id}/bans", {"user_id": user_id})
 
+    # API reference: https://www.yapin.gg/developers/api/moderation#delete-servers-id-bans-uid
     def unban(self, server_id, user_id):
         return self.api("DELETE", f"/servers/{server_id}/bans/{user_id}")
 
+    # API reference: https://www.yapin.gg/developers/api/moderation#patch-servers-id-members-uid
+    def set_nickname(self, server_id, user_id, nickname):
+        """Set someone's nickname ("" clears it)."""
+        return self.api("PATCH", f"/servers/{server_id}/members/{user_id}", {"nickname": nickname})
+
+    # API reference: https://www.yapin.gg/developers/api/moderation#get-servers-id-bans
+    def bans(self, server_id):
+        """Who is banned: [{user_id, banned_by, created_at, user}] (needs Ban members)."""
+        return [Data(b) for b in self.api("GET", f"/servers/{server_id}/bans")["bans"]]
+
+    # API reference: https://www.yapin.gg/developers/api/moderation#get-servers-id-invites
+    def invites(self, server_id):
+        """The server's invites: [{code, url, inviter_id, uses, max_uses, expires_at, vanity, created_at}].
+        Needs Manage Server. Yapin’ invites don't run out: max_uses is 0 (no limit) and expires_at None.
+        member_join events then also say invite_code and inviter_id when known (invite trackers)."""
+        return [Data(i) for i in self.api("GET", f"/servers/{server_id}/invites")["invites"]]
+
+    # API reference: https://www.yapin.gg/developers/api/moderation#post-servers-id-timeouts
     def timeout(self, server_id, user_id, minutes, reason=""):
         """Time someone out for `minutes` (0 clears it)."""
         return self.api("POST", f"/servers/{server_id}/timeouts", {"user_id": user_id, "minutes": minutes, "reason": reason})
 
     # ---- voice (Move Members for moves; 30 moves and 60 lookups a minute per bot) ----
+    # API reference: https://www.yapin.gg/developers/api/voice#get-servers-id-voice
     def voice(self, server_id):
         """Who is in voice: [{channel_id, user_ids}] for every voice channel the bot can see (empty ones too)."""
         return self.api("GET", f"/servers/{server_id}/voice")["voice"]
 
+    # API reference: https://www.yapin.gg/developers/api/voice#post-servers-id-voice-move
     def move_member(self, server_id, user_id, channel_id):
         return self.api("POST", f"/servers/{server_id}/voice/move", {"user_id": user_id, "channel_id": channel_id})
 
+    # API reference: https://www.yapin.gg/developers/api/voice#post-servers-id-voice-disconnect
     def disconnect_member(self, server_id, user_id):
         return self.api("POST", f"/servers/{server_id}/voice/disconnect", {"user_id": user_id})
 
     # ---- the bot in voice: music bots (10 joins and leaves a minute; one voice channel per server) ----
+    # API reference: https://www.yapin.gg/developers/api/voice#post-servers-id-voice-join
     def join_voice(self, server_id, channel_id):
         """A ticket for a voice channel: {url, token, e2ee, voice_muted, channel_id, server_id}. Connect with any
         LiveKit SDK within a minute. The bot sends one audio track (as a mic) and hears nobody. Joining another
         channel of the same server drops it from the first. Most bots want connect_voice, which does all of it."""
         return self.api("POST", f"/servers/{server_id}/voice/join", {"channel_id": channel_id})
 
+    # API reference: https://www.yapin.gg/developers/api/voice#post-servers-id-voice-leave
     def leave_voice(self, server_id):
         """Take the bot out of voice in that server."""
         return self.api("POST", f"/servers/{server_id}/voice/leave")
@@ -901,18 +1580,163 @@ class Bot:
         keys = await _hand_out_voice_key(room, media_key) if media_key else None
         source = rtc.AudioSource(sample_rate, channels)
         track = rtc.LocalAudioTrack.create_audio_track("audio", source)
-        await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE, dtx=False))
+        await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE, dtx=False, red=False))
         return VoiceCall(room, source, track, bool(media_key), keys)
 
+    # ---- channels (Manage channels) ----
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-servers-id-channels
+    def categories(self, server_id):
+        """Channel categories of a server, in order: [{id, name, position}]."""
+        return [Data(c) for c in self.api("GET", f"/servers/{server_id}/channels").get("categories") or []]
+
+    # ---- webhooks (flag bot_webhooks; the bot needs Manage Webhooks in that channel) ----
+    # API reference: https://www.yapin.gg/developers/api/webhooks#post-channels-id-webhooks
+    def create_webhook(self, channel_id, name):
+        """Make a webhook in a text channel and post through it with a name and picture per message (PluralKit style):
+        hook = bot.create_webhook(ch, "Proxy"); hook.send("hi!", username="Alice", avatar_url="https://i.imgur.com/abc.png").
+        The message shows a BOT tag. Up to 10 webhooks a channel, 10 makes and deletes a minute."""
+        return self.wrap_webhook(self.api("POST", f"/channels/{channel_id}/webhooks", {"name": name})["webhook"])
+
+    # API reference: https://www.yapin.gg/developers/api/webhooks#get-channels-id-webhooks
+    def webhooks(self, channel_id):
+        """Every webhook in a channel (people's too, without tokens)."""
+        return [self.wrap_webhook(w) for w in self.api("GET", f"/channels/{channel_id}/webhooks")["webhooks"]]
+
+    # API reference: https://www.yapin.gg/developers/api/webhooks#get-webhooks
+    def my_webhooks(self):
+        """The bot's own webhooks in every server, newest first: find them again after a restart."""
+        return [self.wrap_webhook(w) for w in self.api("GET", "/webhooks")["webhooks"]]
+
+    # API reference: https://www.yapin.gg/developers/api/webhooks#delete-webhooks-id
+    def delete_webhook(self, webhook_id):
+        """Delete a webhook (its old messages stay)."""
+        return self.api("DELETE", f"/webhooks/{webhook_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/webhooks#post-webhooks-id
+    def send_webhook(self, webhook_id, content="", username=None, avatar_url=None, embeds=None, components=None, allowed_mentions=None):
+        """Post through one of the bot's own webhooks. avatar_url: an https link to Yapin’ uploads or a known image host.
+        components: link buttons only. Limits: 5 per 2 seconds per webhook, 30 a minute per channel, plus the bot's own."""
+        body = {"content": str(content or "")}
+        if username:
+            body["username"] = username
+        if avatar_url:
+            body["avatar_url"] = avatar_url
+        if embeds:
+            body["embeds"] = _listed(embeds)
+        if components:
+            body["components"] = _listed(components)
+        if allowed_mentions is not None:
+            body["allowed_mentions"] = allowed_mentions
+        return self.api("POST", f"/webhooks/{webhook_id}", body)["message"]
+
+    def wrap_webhook(self, data):
+        """A webhook's dict -> a Webhook with send / delete."""
+        return Webhook.of(data, self)
+
+    # API reference: https://www.yapin.gg/developers/api/channels#post-servers-id-channels
+    def create_channel(self, server_id, name, kind="text", category_id=None):
+        """Make a channel: kind "text" or "voice", optionally in a category. Returns the channel."""
+        body = {"name": name, "kind": kind}
+        if category_id:
+            body["category_id"] = category_id
+        return Data(self.api("POST", f"/servers/{server_id}/channels", body).get("channel") or {})
+
+    # ---- events (in testing) ----
+
+    # API reference: https://www.yapin.gg/developers/api/scheduled-events#get-servers-id-events
+    def events(self, server_id):
+        """Upcoming and live events of a server."""
+        return [Data(e) for e in self.api("GET", f"/servers/{server_id}/events").get("events") or []]
+
+    # API reference: https://www.yapin.gg/developers/api/scheduled-events#post-servers-id-events
+    def create_event(self, server_id, title, starts_at, ends_at=None, channel_id=None, location=None,
+                     announce_channel_id=None, repeat="none", tz="UTC", description=""):
+        """Make an event (Manage Events): a voice channel_id or a location. Times are datetimes or ISO strings."""
+        iso = lambda d: d.isoformat() if hasattr(d, "isoformat") else d
+        body = {"title": title, "starts_at": iso(starts_at), "ends_at": iso(ends_at), "channel_id": channel_id,
+                "location": location, "announce_channel_id": announce_channel_id, "repeat": repeat, "tz": tz,
+                "description": description}
+        return Data(self.api("POST", f"/servers/{server_id}/events", body).get("event") or {})
+
+    # API reference: https://www.yapin.gg/developers/api/channels#patch-channels-id
+    def edit_channel(self, channel_id, name=None, category_id=None, private=None, role_ids=None, read_only=None,
+                     post_role_ids=None, slowmode=None):
+        """Change a channel; what you leave out stays. Returns the channel."""
+        body = {k: v for k, v in (("name", name), ("category_id", category_id), ("private", private), ("role_ids", role_ids),
+                                  ("read_only", read_only), ("post_role_ids", post_role_ids), ("slowmode", slowmode)) if v is not None}
+        return Data(self.api("PATCH", f"/channels/{channel_id}", body).get("channel") or {})
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-channels-id
+    def delete_channel(self, channel_id):
+        return self.api("DELETE", f"/channels/{channel_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/channels#post-servers-id-categories
+    def create_category(self, server_id, name):
+        """Make a channel category. Returns {id, name}."""
+        return Data(self.api("POST", f"/servers/{server_id}/categories", {"name": name}).get("category") or {})
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-servers-id-categories-cid
+    def delete_category(self, server_id, category_id):
+        return self.api("DELETE", f"/servers/{server_id}/categories/{category_id}")
+
+    # ---- DMs ----
+
+    # API reference: https://www.yapin.gg/developers/api/users#post-users-id-dm
     def dm(self, user_id):
-        """Open a DM with someone. Returns the channel id."""
+        """Open a DM with someone (they must allow DMs from the bot). Returns the channel id; then bot.send(channel_id, ...)."""
         return self.api("POST", f"/users/{user_id}/dm")["channel_id"]
 
+    def dm_send(self, user_id, content="", embeds=None, components=None, files=None):
+        """Open a DM and send one message in it (files=[...] like bot.send). Returns the message."""
+        return self.send(self.dm(user_id), content, embeds=embeds, components=components, files=files)
+
+    # API reference: https://www.yapin.gg/developers/api/bot#put-me-status
     def set_status(self, status="online", activity=None):
         return self.api("PUT", "/me/status", {"status": status, "activity": activity})
 
+    # API reference: https://www.yapin.gg/developers/api/bot#patch-me
     def set_profile(self, display_name=None, bio=None):
+        """Change the bot's display name and/or bio: set_profile(display_name="Dice Bot", bio="Rolls dice")."""
         return self.api("PATCH", "/me", {k: v for k, v in (("display_name", display_name), ("bio", bio)) if v is not None})
+
+    # API reference: https://www.yapin.gg/developers/api/bot#put-me-avatar
+    def set_avatar(self, image, type=None):
+        """Set the bot's profile picture: a file path, bytes or an open binary file. PNG, JPG, GIF or WebP, up to 8 MB.
+        `type` (like "image/png") is needed only for bytes without a file name."""
+        return self._upload("/me/avatar", image, type)
+
+    # API reference: https://www.yapin.gg/developers/api/bot#put-me-banner
+    def set_banner(self, image, type=None):
+        """The bot's banner, same inputs as set_avatar."""
+        return self._upload("/me/banner", image, type)
+
+    def _upload(self, path, image, type=None):
+        name = image if isinstance(image, str) else getattr(image, "name", "")
+        if isinstance(image, str):
+            with open(image, "rb") as f:
+                data = f.read()
+        elif hasattr(image, "read"):
+            data = image.read()
+        else:
+            data = bytes(image)
+        ext = str(name).rsplit(".", 1)[-1].lower() if "." in str(name) else ""
+        type = type or {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}.get(ext)
+        if not type:
+            raise ValueError('Pass the image type too, like type="image/png"')
+        base = self._fallback if self._fallback and time.time() < self._fallback_until else self.base
+        req = urllib.request.Request(base + path, method="PUT", data=data, headers={
+            "Authorization": f"Bot {self.token}", "Content-Type": type, "User-Agent": f"yapper-py/{__version__}"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                raw = r.read()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as e:
+            try:
+                err = json.loads(e.read() or b"{}")
+            except Exception:
+                err = {}
+            raise YapperError((err.get("error") if isinstance(err, dict) else None) or f"upload failed ({e.code})", e.code) from None
 
     # ---- events ----
 
@@ -940,6 +1764,22 @@ class Bot:
             except Exception as e:
                 self._fail(e, self._owner_of(fn), event)
 
+    def emit(self, event, payload):
+        """Run the listeners of an event yourself: bot.emit("my_event", data). Errors go to the "error" listeners."""
+        self._emit(event, payload)
+
+    def fail(self, e):
+        """Report an error the way the bot does: to the "error" listeners, or the log when there are none."""
+        self._fail(e)
+
+    def wrap(self, data):
+        """A message event's dict -> a Message with reply / say / author_mention (handle() does it for you)."""
+        return Message.of(data, self)
+
+    def wrap_interaction(self, data):
+        """A button click's dict -> an Interaction with reply / ephemeral / update / ack / user_mention."""
+        return Interaction.of(data, self)
+
     def _owner_of(self, fn):
         for o in self._owners.values():
             if any(f is fn for _, f in o.listeners) or any(b["fn"] is fn for b in o.buttons):
@@ -953,7 +1793,7 @@ class Bot:
         if kind == "message":
             if self.ignore_bots and data.get("author_bot"):
                 return
-            msg = Message.of(data, self)
+            msg = self.wrap(data)
             name, args = data.get("command"), data.get("args")
             # "/fish @OtherBot": a command picked for another bot (command_for) isn't ours to answer, even if we have /fish.
             cf = data.get("command_for")
@@ -988,20 +1828,28 @@ class Bot:
                     self._emit("command", msg)
             self._emit("message", msg)
         elif kind == "interaction":
-            i = Interaction.of(data, self)
+            i = self.wrap_interaction(data)
+            cid = str(data.get("custom_id") or "")
             for b in list(self._buttons):
-                if str(data.get("custom_id") or "").startswith(b["prefix"]):
+                if self._button_hit(b, cid):
                     try:
                         b["fn"](i)
                     except Exception as e:
-                        self._fail(e, b["owner"], "button " + b["prefix"])
+                        self._fail(e, b["owner"], "button " + str(b["label"]))
             self._emit("interaction", i)
+        elif kind == "dm_message":
+            # A DM to this bot. Commands aren't run here (they are for servers); answer in on_dm / on("dm_message").
+            if self.ignore_bots and data.get("author_bot"):
+                return
+            msg = self.wrap(data)
+            msg.dm = True
+            msg.is_dm = True
+            msg.dm_channel_id = data.get("dm_channel_id") or data.get("channel_id")
+            self._emit("dm_message", msg)
         else:
-            if kind == "test" and not self._listeners.get("test") and self.log:
-                # "Send test event" in the developer settings: with no listener it used to vanish silently.
-                print(f"[yapper] test event received{' (' + data['message'] + ')' if isinstance(data.get('message'), str) else ''}: the bot is connected and getting events")
             self._emit(kind, Data(data, type=kind))
 
+    # API reference: https://www.yapin.gg/developers/api/bot#put-commands
     def sync_commands(self):
         """Send the command list to Yapin’ (run() does it, and again after cogs change)."""
         self._dirty = False
@@ -1009,23 +1857,21 @@ class Bot:
         self.api("PUT", "/commands", {"commands": cmds})
         return cmds
 
+    # API reference: https://www.yapin.gg/developers/api/events#get-events
+    # API reference: https://www.yapin.gg/developers/api/bot#get-me
     def run(self):
         """Register the commands and handle events until stopped (Ctrl+C)."""
         try:
             self._run()
         except KeyboardInterrupt:
             print("[yapper] stopped")
-        except YapperError as e:
-            hint = {400: "the request was rejected", 401: "the token was rejected: make a new one in Settings -> Developer",
-                    403: "this bot isn't allowed to do that"}.get(e.status, "")
-            print(f"[yapper] could not start ({e.status}): {e}" + (f"\n[yapper] {hint}" if hint else ""))
-            raise SystemExit(1) from None
         finally:
             self.running = False
             self._registered = False
 
     def _run(self):
         self.running = True
+        _check_version(self.base, self.log)
         fails = 0
         while self.running:
             try:
@@ -1185,6 +2031,18 @@ class Bot:
                 ws.close()
             except Exception:
                 pass
+
+
+def _iso(t):
+    """A datetime, unix seconds or a string -> an ISO time for the API."""
+    import datetime
+    if isinstance(t, (int, float)):
+        t = datetime.datetime.fromtimestamp(t, datetime.timezone.utc)
+    if isinstance(t, datetime.datetime):
+        if t.tzinfo is None:
+            t = t.astimezone()
+        return t.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    return str(t)
 
 
 def _module_name(name):

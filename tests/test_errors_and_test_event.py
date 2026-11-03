@@ -11,12 +11,12 @@ def make_bot():
 
 
 class TestEventTests(unittest.TestCase):
-    def test_test_event_prints_without_listener(self):
+    def test_test_event_without_listener_is_ignored(self):
         bot = make_bot()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            bot.handle({"id": 1, "type": "test", "data": {}})
-        self.assertIn("test event received", out.getvalue())
+            bot.handle({"id": 1, "type": "test", "data": {}})  # must not raise
+        self.assertEqual(out.getvalue(), "")
 
     def test_test_event_still_reaches_listener_and_stays_quiet(self):
         bot = make_bot()
@@ -30,16 +30,15 @@ class TestEventTests(unittest.TestCase):
 
 
 class RunErrorTests(unittest.TestCase):
-    def test_bad_token_is_printed_not_raised_as_traceback(self):
-        bot = make_bot()
+    def test_bad_token_raises_yapper_error_and_stops(self):
+        bot = y.Bot("yb_test", log=False)  # log=False also skips the background update check (no network)
         def boom(*a, **k):
             raise y.YapperError("bad token", 401)
         bot.api = boom
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+        with self.assertRaises(y.YapperError) as cm:
             bot.run()
-        self.assertIn("could not start (401)", out.getvalue())
-        self.assertIn("Settings -> Developer", out.getvalue())
+        self.assertEqual(cm.exception.status, 401)
+        self.assertFalse(bot.running)
 
 
 if __name__ == "__main__":

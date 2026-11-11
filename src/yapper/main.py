@@ -1,4 +1,4 @@
-"""Yapin’ bot library for Python. One file, standard library only, Python 3.10+.
+"""Yapin’ bot library for Python. One file, Python 3.10+.
 
     import yapper
 
@@ -48,22 +48,56 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-    print("imported python-dotenv")
-except:
-    print("python-dotenv not imported")
-
+from typing import Any, List, NewType, Optional, Union
 
 __all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button",
            "Embed", "Button", "Row", "TextDisplay", "Thumbnail", "Section", "MediaGallery", "Separator", "FileComponent",
            "Container", "IS_COMPONENTS_V2", "text", "thumbnail", "section", "media", "gallery", "separator", "file_display",
-           "container", "Message", "Interaction", "Data", "VERSION"]
+           "container", "Message", "Interaction", "Data", "VERSION",
+           "UserId", "ServerId", "ChannelId", "ThreadId", "CategoryId", "RoleId", "MessageId", "EmojiId", "WebhookId",
+           "is_user", "is_member", "is_server", "is_channel", "is_thread", "is_category", "is_role", "is_message"]
+
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("Imported python-dotenv")
+except ImportError as e:
+    print(f'Failed To Import python-dotenv: {e} Please manually pass in a bot token by either doing yapper.Bot("YOUR_TOKEN") or yapper.Bot(token=YOUR_TOKEN)')
+
 # Stamped from public/sdk/version.json by scripts/sdk-build.mjs (same as the PyPI package "yapin").
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 VERSION = __version__
+
+# Typed ids: every id is a UUID string, so these only help your editor and type checker (mypy, pyright) tell a user id
+# from a channel id. No runtime cost: UserId("…") is the same str. Plain strings still work everywhere.
+UserId = NewType("UserId", str)
+ServerId = NewType("ServerId", str)
+ChannelId = NewType("ChannelId", str)
+ThreadId = NewType("ThreadId", str)
+CategoryId = NewType("CategoryId", str)
+RoleId = NewType("RoleId", str)
+MessageId = NewType("MessageId", str)
+EmojiId = NewType("EmojiId", str)
+WebhookId = NewType("WebhookId", str)
+
+
+def _is(kind):
+    def check(x: Any) -> bool:
+        return isinstance(x, dict) and x.get("object") == kind
+    check.__name__ = f"is_{kind}"
+    check.__doc__ = f'True when x is a {kind}: everything from the API and gateway has "object" ("user", "channel" ...).'
+    return check
+
+
+is_user = _is("user")
+is_member = _is("member")
+is_server = _is("server")
+is_channel = _is("channel")
+is_thread = _is("thread")
+is_category = _is("category")
+is_role = _is("role")
+is_message = _is("message")
 
 BASE = "https://bots.yapper.website/api/bot/v1"
 # The website's address for the same API: used for 10 minutes when BASE can't be reached.
@@ -71,7 +105,9 @@ FALLBACK_BASE = "https://www.yapin.gg/api/bot/v1"
 GATEWAY = "wss://rt.yapper.website/bot"
 COMMAND_LIMIT = 100
 EVENTS = ("message", "command", "dm_message", "member_join", "member_leave", "reaction_add", "reaction_remove",
-          "voice_join", "voice_leave", "invite_create", "invite_delete", "interaction", "test", "ready", "error")
+          "voice_join", "voice_leave", "invite_create", "invite_delete", "interaction",
+          "channel_create", "channel_update", "channel_delete", "thread_create", "thread_update", "thread_delete",
+          "category_create", "category_update", "category_delete", "test", "ready", "error")
 
 
 class _Form:
@@ -1366,7 +1402,7 @@ class Bot:
 
     # ---- HTTP ----
 
-    def api(self, method, path, body=None, timeout=40, retries=3, _waited=0.0):
+    def api(self, method, path, body=None, timeout=40, retries=3, _waited=0.0, _proxy_retried=False):
         """Raw API call: bot.api("GET", "/servers"). A 429 with Retry-After, or Yapin’s own 503 "busy",
         is waited out and retried, up to 3 times and max_retry_wait seconds in total (nothing was done, so that's
         safe). Other errors raise YapperError."""
@@ -1397,6 +1433,14 @@ class Bot:
                 self._cf_warned = True
                 print("[yapper] Cloudflare rate limited this machine's IP address (not a Yapin' bot limit). If several bots share this IP, tell us in Yapin' HQ.")
             busy = e.code == 503 and "retry_after" in err
+            # A 502/503/504 from the proxy in front of us (a release swapping copies, a restart): asked once more after
+            # 2 s. A 503 means nothing was done; a 502/504 may have gone through, so only GET, PUT and DELETE then.
+            again = e.code == 503 or (e.code in (502, 504) and method in ("GET", "PUT", "DELETE"))
+            if again and not busy and not _proxy_retried and retries > 0:
+                if self.log:
+                    print(f"[yapper] {method} {path} answered {e.code}, trying once more in 2s")
+                time.sleep(2)
+                return self.api(method, path, body, timeout, retries - 1, _waited + 2, True)
             wait = 0
             if e.code == 429 or busy:
                 try:
@@ -1428,13 +1472,16 @@ class Bot:
     # ---- messages and more ----
 
     # API reference: https://www.yapin.gg/developers/api/messages#post-channels-id-messages
-    def send(self, channel_id, content="", embeds=None, components=None, reply_to=None, files=None):
+    def send(self, channel_id, content="", embeds=None, components=None, reply_to=None, files=None, sticker_id=None):
         """Post a message. Embeds and buttons are plain dicts (see /developers). Returns the message.
         files (in testing, flag bot_uploads): up to 4, each a file path, an open binary file, or ("card.png", bytes).
         Pictures, videos, sounds, TXT, PDF, ZIP, 10 MB each, 12 MB in all. Every file becomes its own message (the first one has
         the text) and is checked before it shows; content can be "" then.
+        sticker_id (in testing, flag stickers): one of the server's stickers as the whole message; content stays "".
         bot.send(ch, "Welcome!", files=[("welcome.png", png_bytes)])"""
         body = {"content": str(content or "")}
+        if sticker_id:
+            body["sticker_id"] = sticker_id
         if reply_to:
             body["reply_to"] = reply_to
         if embeds:
@@ -1585,8 +1632,19 @@ class Bot:
     def roles(self, server_id):
         return [Data(r) for r in self.api("GET", f"/servers/{server_id}/roles")["roles"]]
 
+    # API reference: https://www.yapin.gg/developers/api/users#get-resolve-id
+    def resolve(self, id: str) -> Optional[Data]:
+        """What an id is: Data(id, object="channel" | "user" | "role" ..., server_id, channel_id), or None (unknown,
+        or something the bot can't see). 120 a minute per bot. In testing (flag bot_api_round2)."""
+        try:
+            return Data(self.api("GET", f"/resolve/{urllib.parse.quote(str(id), safe='')}"))
+        except YapperError as e:
+            if e.status == 404:
+                return None
+            raise
+
     # API reference: https://www.yapin.gg/developers/api/users#get-users-id
-    def user(self, user_id):
+    def user(self, user_id: UserId):
         return Data(self.api("GET", f"/users/{user_id}")["user"])
 
     # API reference: https://www.yapin.gg/developers/api/messages#get-channels-id-messages
@@ -1628,8 +1686,27 @@ class Bot:
         return Data(self.api("PATCH", f"/servers/{server_id}/roles/{role_id}", body).get("role") or {})
 
     # API reference: https://www.yapin.gg/developers/api/roles#delete-servers-id-roles-rid
-    def delete_role(self, server_id, role_id):
+    def delete_role(self, server_id: ServerId, role_id: RoleId):
         return self.api("DELETE", f"/servers/{server_id}/roles/{role_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/roles#get-servers-id-roles-rid
+    def get_role(self, server_id: ServerId, role_id: RoleId) -> Data:
+        """One role. In testing (flag bot_api_round2)."""
+        return Data(self.api("GET", f"/servers/{server_id}/roles/{role_id}")["role"])
+
+    # API reference: https://www.yapin.gg/developers/api/roles#patch-servers-id-roles
+    def reorder_roles(self, server_id: ServerId, role_ids: List[RoleId]) -> List[Data]:
+        """Put roles in this order, top first. Roles left out keep their order below these; roles at or above the
+        bot's own stay put. Returns every role, top first. In testing (flag bot_api_round2)."""
+        return [Data(r) for r in self.api("PATCH", f"/servers/{server_id}/roles", {"ids": list(role_ids)})["roles"]]
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-channels-id-permissions-target
+    # API reference: https://www.yapin.gg/developers/api/roles#get-servers-id-members-uid-permissions
+    def get_permissions(self, server_id: ServerId, user_id: UserId, channel_id: Optional[ChannelId] = None) -> Data:
+        """What someone can do, worked out like the app does: in the server, or in one channel (overrides included).
+        Data(owner, administrator, permissions={"kick_members": True, ...}). In testing (flag bot_api_round2)."""
+        path = f"/channels/{channel_id}/permissions/{user_id}" if channel_id else f"/servers/{server_id}/members/{user_id}/permissions"
+        return Data(self.api("GET", path)["permissions"])
 
     # ---- custom emojis (Manage Emoji; 30 changes a minute per bot; in testing, flag bot_emojis) ----
 
@@ -1699,13 +1776,13 @@ class Bot:
         """A channel's permission overrides: [{role_id (None = @everyone), allow, deny}]."""
         return [Data(o) for o in self.api("GET", f"/channels/{channel_id}/permissions")["overrides"]]
 
-    # API reference: https://www.yapin.gg/developers/api/channels#put-channels-id-permissions-role
+    # API reference: https://www.yapin.gg/developers/api/channels#put-channels-id-permissions-target
     def set_channel_permissions(self, channel_id, role_id, allow=(), deny=()):
         """Allow or deny permissions for a role (or "everyone") in one channel:
         set_channel_permissions(ch, role_id, allow=["send_messages"], deny=["view_channel"]). Empty lists remove it."""
         return self.api("PUT", f"/channels/{channel_id}/permissions/{role_id}", {"allow": list(allow), "deny": list(deny)})
 
-    # API reference: https://www.yapin.gg/developers/api/channels#delete-channels-id-permissions-role
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-channels-id-permissions-target
     def clear_channel_permissions(self, channel_id, role_id):
         return self.api("DELETE", f"/channels/{channel_id}/permissions/{role_id}")
 
@@ -1718,6 +1795,38 @@ class Bot:
     # API reference: https://www.yapin.gg/developers/api/channels#delete-servers-id-categories-cid-permissions-role
     def clear_category_permissions(self, server_id, category_id, role_id):
         return self.api("DELETE", f"/servers/{server_id}/categories/{category_id}/permissions/{role_id}")
+
+    # ---- overrides, round 2 (in testing, flag bot_api_round2): target is a role id or "everyone" ----
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-channels-id-overrides
+    def get_overrides(self, channel_id: ChannelId) -> List[Data]:
+        """A channel's overrides: [Data(object="override", type="role" | "everyone", id, role_id, allow, deny)]."""
+        return [Data(o) for o in self.api("GET", f"/channels/{channel_id}/overrides")["overrides"]]
+
+    # API reference: https://www.yapin.gg/developers/api/channels#put-channels-id-overrides-target
+    def set_override(self, channel_id: ChannelId, target: Union[RoleId, str], allow=(), deny=()) -> Optional[Data]:
+        """set_override(ch, role_id or "everyone", allow=["send_messages"], deny=["view_channel"]). Empty lists remove it.
+        Same rules as a person: only roles below the bot's top role, only permissions the bot has itself."""
+        out = self.api("PUT", f"/channels/{channel_id}/overrides/{target}", {"allow": list(allow), "deny": list(deny)})
+        return Data(out["override"]) if out.get("override") else None
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-channels-id-overrides-target
+    def delete_override(self, channel_id: ChannelId, target: Union[RoleId, str]):
+        return self.api("DELETE", f"/channels/{channel_id}/overrides/{target}")
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-categories-id-overrides
+    def get_category_overrides(self, category_id: CategoryId) -> List[Data]:
+        """A category's overrides (its channels follow them unless they set their own)."""
+        return [Data(o) for o in self.api("GET", f"/categories/{category_id}/overrides")["overrides"]]
+
+    # API reference: https://www.yapin.gg/developers/api/channels#put-categories-id-overrides-target
+    def set_category_override(self, category_id: CategoryId, target: Union[RoleId, str], allow=(), deny=()) -> Optional[Data]:
+        out = self.api("PUT", f"/categories/{category_id}/overrides/{target}", {"allow": list(allow), "deny": list(deny)})
+        return Data(out["override"]) if out.get("override") else None
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-categories-id-overrides-target
+    def delete_category_override(self, category_id: CategoryId, target: Union[RoleId, str]):
+        return self.api("DELETE", f"/categories/{category_id}/overrides/{target}")
 
     # API reference: https://www.yapin.gg/developers/api/moderation#post-servers-id-kick
     def kick(self, server_id, user_id):
@@ -2110,7 +2219,8 @@ class Bot:
             msg.dm_channel_id = data.get("dm_channel_id") or data.get("channel_id")
             self._emit("dm_message", msg)
         else:
-            self._emit(kind, Data(data, type=kind))
+            # A channel / thread event's data has its own "type" (text, voice, thread): kept, the event name is in .event.
+            self._emit(kind, Data(data, type=data.get("type", kind) if data.get("object") in ("channel", "thread") else kind, event=kind))
 
     # API reference: https://www.yapin.gg/developers/api/bot#put-commands
     def sync_commands(self):

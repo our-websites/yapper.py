@@ -77,7 +77,7 @@ class WithoutDotenvTests(unittest.TestCase):
             code = "import sys; sys.modules['dotenv'] = None; import yapper; print('imported', yapper.__version__)"
             r = run(code, d)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertTrue(r.stdout.startswith("imported "))
+            self.assertTrue(r.stdout.startswith("Imported "))
             # ...and the .env is simply not read, so a token is still required
             r = run("import sys; sys.modules['dotenv'] = None; " + TOKEN, d)
             self.assertNotEqual(r.returncode, 0)

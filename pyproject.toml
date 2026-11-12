@@ -28,6 +28,11 @@ classifiers = [
 license = "GPL-3.0-only"
 license-files = ["LICEN[CS]E*"]
 
+[project.optional-dependencies]
+test = [
+    "coverage>=7.0",
+]
+
 [project.urls]
 Repository = "https://github.com/our-websites/yapper.py"
 Issues = "https://github.com/our-websites/yapper.py/issues"
@@ -35,3 +40,10 @@ Documentation = "https://yapin.gg/developers"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/yapper"]
+
+[tool.coverage.xml]
+output = "coverage.xml"

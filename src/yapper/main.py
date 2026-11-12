@@ -900,7 +900,9 @@ class _WebSocket:
         try:
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if tls:
-                self.sock = ssl.create_default_context().wrap_socket(self.sock, server_hostname=u.hostname)
+                context = ssl.create_default_context()
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                self.sock = context.wrap_socket(self.sock, server_hostname=u.hostname)
             key = base64.b64encode(os.urandom(16)).decode()
             host = u.hostname if port == (443 if tls else 80) else f"{u.hostname}:{port}"
             self.sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"

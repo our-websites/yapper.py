@@ -1,10 +1,11 @@
+
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "yapper.py"
-version = "1.7.0"
+version = "1.7.1"
 authors = [
   { name="LeAndre C.", email="leandre@lecanact.me" },
 ]

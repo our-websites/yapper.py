@@ -58,7 +58,7 @@ Run it with `python bot.py`. People can now type `/ping` or `!ping`. Nothing to 
 
 ## Main concepts
 
-- **Commands**: `@bot.command("name", "description")`. People type `/name` or `!name`; `msg.args` is the rest of the line and `msg.argv` is it split on spaces.
+- **Commands**: `@bot.command("name", "description")`. People type `/name` or `!name`; `msg.args` is the rest of the line and `msg.argv` handles quotes and backslash escapes. Add aliases, subcommands, typed arguments, checks, cooldowns and generated help as needed.
 - **Events**: `@bot.on("member_join")`, or `@bot.event` on a function named `on_member_join`. Also `@bot.on_dm` for direct messages and `@bot.on_reaction_on_mine` for reactions on the bot's own messages.
 - **Buttons**: `@bot.button("prefix:")` for every `custom_id` starting with a prefix, or `@bot.on_button("ping")` for one exact id (a `re.compile(...)` pattern works too). Answer with `i.reply`, `i.ephemeral`, `i.update` or `i.ack` within 3 seconds.
 - **Embeds and buttons**: `yapper.Embed()`, `yapper.Button`, `yapper.Row`. Every setter returns the object, so they chain: `yapper.Embed().title("Score").field("Kills", "12", True).color("green")`. The plain `yapper.row(...)`, `yapper.btn(...)` and `yapper.link_button(...)` helpers still work.
@@ -91,6 +91,47 @@ Run it with `python bot.py`. People can now type `/ping` or `!ping`. Nothing to 
 
   Use `bot.add_cog(...)`, `bot.load_extension(...)`, `bot.unload_extension(...)` and `bot.reload_extension(...)` to manage them while the bot runs.
 - **Errors**: failed API calls raise `yapper.YapperError` (`.status`, `.retry_after`). Rate limits are waited out for you.
+
+## Richer commands
+
+Existing one-argument handlers keep working. Add annotations when you want the library to parse and convert arguments; `str`, `int`, `float`, `bool`, `UserId`, `ChannelId`, optional types and custom callable converters are supported. User/channel annotations also accept `<@id>` and `<#id>` mentions. Defaults are used when an argument is omitted.
+
+```python
+import random
+
+@bot.command("dice roll", "Roll a die", aliases=["roll", "dice r"])
+@yapper.cooldown(1, 5, bucket="user")
+def roll(msg, sides: int = 6, label: str = "plain"):
+    msg.reply(f"{label}: {random.randint(1, sides)}")
+```
+
+This accepts `!dice roll 12 "lucky die"`, `!roll 12`, and `/dice roll 12`. Aliases are full command paths, so `dice r` is another way to reach `dice roll`. Only the root `dice` is advertised to Yapin; subcommands and aliases are routed locally. A root handler is optional when every invocation goes through a subcommand.
+
+Use decorators to add reusable authorization checks:
+
+```python
+@bot.command("purge", "Delete recent messages")
+@yapper.server_only()
+@yapper.has_permissions("manage_messages")
+def purge(msg):
+    # ...
+```
+
+The built-ins are `owner_only()`, `server_only()`, `has_roles(...)` and `has_permissions(...)`. Roles allow any listed role; permissions require every listed permission and account for channel overrides. Use `@yapper.check(predicate)` for a custom check. Cooldown buckets are `user`, `channel`, `server` and `global`.
+
+Call `bot.help_command()` to install `/help` and `!help`, `bot.help("dice roll")` for one command, or `bot.command_info()` for generated usage metadata.
+
+Static prefixes still work. For database-backed or per-server prefixes, replace them with a resolver and optionally enable mentions:
+
+```python
+@bot.prefixes_with
+def prefixes(msg):
+    return "yap!" if msg.server_id == "server-id" else "!"
+
+bot.mention_prefix()  # <@bot-id> ping and <@!bot-id> ping
+```
+
+The same options work on cog methods through `@yapper.command(..., aliases=[...])`, `@yapper.cooldown(...)` and the check decorators.
 
 ## Useful bot methods
 

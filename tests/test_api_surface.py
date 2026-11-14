@@ -3,7 +3,8 @@ import importlib.util, pathlib, unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAIN_PATH = ROOT / "src" / "yapper" / "main.py"
-EXPECTED = ("Bot", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button")
+EXPECTED = ("Bot", "Cog", "command", "listener", "button", "YapperError", "CommandError", "Cooldown", "cooldown",
+            "check", "owner_only", "server_only", "has_roles", "has_permissions", "row", "btn", "link_button")
 
 
 class ApiSurfaceTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Yapin’ bot library for Python. One file, Python 3.10+.
+"""Yapin’ bot library for Python. One file, standard library only, Python 3.9+.
 
     import yapper
 
@@ -50,23 +50,21 @@ import urllib.parse
 import urllib.request
 from typing import Any, List, NewType, Optional, Union
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except:
+    pass
+
+
 __all__ = ["Bot", "VoiceCall", "Cog", "command", "listener", "button", "YapperError", "row", "btn", "link_button",
            "Embed", "Button", "Row", "TextDisplay", "Thumbnail", "Section", "MediaGallery", "Separator", "FileComponent",
            "Container", "IS_COMPONENTS_V2", "text", "thumbnail", "section", "media", "gallery", "separator", "file_display",
            "container", "Message", "Interaction", "Data", "VERSION",
            "UserId", "ServerId", "ChannelId", "ThreadId", "CategoryId", "RoleId", "MessageId", "EmojiId", "WebhookId",
            "is_user", "is_member", "is_server", "is_channel", "is_thread", "is_category", "is_role", "is_message"]
-
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-    print("Imported python-dotenv")
-except ImportError as e:
-    print(f'Failed To Import python-dotenv: {e} Please manually pass in a bot token by either doing yapper.Bot("YOUR_TOKEN") or yapper.Bot(token=YOUR_TOKEN)')
-
-# Stamped from public/sdk/version.json by scripts/sdk-build.mjs (same as the PyPI package "yapin").
-__version__ = "1.7.0"
+# Stamped from public/sdk/version.json by scripts/sdk-build.mjs.
+__version__ = "1.8.0"
 VERSION = __version__
 
 # Typed ids: every id is a UUID string, so these only help your editor and type checker (mypy, pyright) tell a user id
@@ -107,7 +105,9 @@ COMMAND_LIMIT = 100
 EVENTS = ("message", "command", "dm_message", "member_join", "member_leave", "reaction_add", "reaction_remove",
           "voice_join", "voice_leave", "invite_create", "invite_delete", "interaction",
           "channel_create", "channel_update", "channel_delete", "thread_create", "thread_update", "thread_delete",
-          "category_create", "category_update", "category_delete", "test", "ready", "error")
+          "category_create", "category_update", "category_delete",
+          "message_update", "message_delete", "message_delete_bulk", "server_add", "server_remove",
+          "test", "ready", "error")
 
 
 class _Form:
@@ -154,12 +154,17 @@ def _form(body, files):
 
 
 class YapperError(RuntimeError):
-    """An API call failed. `.status` is the HTTP status, `.retry_after` the seconds to wait on a 429 (or None)."""
+    """An API call failed. `.status` is the HTTP status, `.retry_after` the seconds to wait on a 429 (or None).
+    `.code` says what kind of error it is and stays the same when the wording changes: "missing_permission",
+    "not_found", "rate_limited", "invalid_request" ... With "missing_permission", `.permission` names the
+    permission the bot needs, like "manage_roles" (None when we can't tell)."""
 
-    def __init__(self, message, status=None, retry_after=None):
+    def __init__(self, message, status=None, retry_after=None, code=None, permission=None):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
+        self.code = code
+        self.permission = permission
 
 
 class Data(dict):
@@ -198,7 +203,7 @@ class Message(Data):
 
 
 class CommandMessage(Message):
-    """A slash command picked from the / menu (a command event, flag bot_slash_interactions): nothing was posted in
+    """A slash command picked from the / menu (a command event): nothing was posted in
     chat. Same fields as a command message (command, args, argv, author_id, author, channel_id, content "/roll 2d6") plus
     interaction=True. reply / say answer it (shown with "<user> used /cmd" above), ephemeral only to them, ack: "got it"."""
 
@@ -216,16 +221,16 @@ class CommandMessage(Message):
         """Same as reply."""
         return self._answer("reply", content, embeds, components)
 
-    def ephemeral(self, content="", embeds=None):
-        """Only the person who used the command sees it."""
-        return self._answer("ephemeral", content, embeds)
+    def ephemeral(self, content="", embeds=None, components=None):
+        """Only the person who used the command sees it. components=[...]: rows of buttons."""
+        return self._answer("ephemeral", content, embeds, components)
 
     def ack(self):
         """Just "got it", no message."""
         return self._answer("ack")
 
     def show_modal(self, modal):
-        """Open a form for the person who used the command (a Modal, flag bot_modals). Only as the first answer.
+        """Open a form for the person who used the command (a Modal). Only as the first answer.
         It comes back to on_modal with i.values."""
         return self._bot.respond(self, "modal", modal=modal)
 
@@ -241,12 +246,14 @@ class Interaction(Data):
         """A new message in the channel. layout=[...] sends a Components V2 message instead."""
         return self._answer("reply", None if layout is not None else content, embeds, components, layout)
 
-    def ephemeral(self, content="", embeds=None):
-        """A message only the person who clicked sees."""
-        return self._answer("ephemeral", content, embeds)
+    def ephemeral(self, content="", embeds=None, components=None):
+        """A message only the person who clicked sees. components=[...] takes rows
+        of buttons. A click on one arrives with i.reply_id, and i.update(...) then changes that ephemeral reply in place."""
+        return self._answer("ephemeral", content, embeds, components)
 
     def update(self, content=None, embeds=None, components=None, layout=None):
-        """Change the message the button is on (left out = kept). On a Components V2 message: update(layout=[...])."""
+        """Change the message the button is on (left out = kept). On a Components V2 message: update(layout=[...]).
+        When the click was on an ephemeral reply (i.reply_id), it changes that reply instead."""
         return self._answer("update", content, embeds, components, layout)
 
     def ack(self):
@@ -254,7 +261,7 @@ class Interaction(Data):
         return self._answer("ack")
 
     def show_modal(self, modal):
-        """Open a form for the person (a Modal). Only as the first answer, not to a modal_submit. Flag bot_modals."""
+        """Open a form for the person (a Modal). Only as the first answer, not to a modal_submit."""
         return self._bot.respond(self, "modal", modal=modal)
 
     @property
@@ -306,8 +313,8 @@ def _check_version(base, log):
             with urllib.request.urlopen(req, timeout=5) as r:
                 latest = (json.loads(r.read().decode() or "{}").get("sdk") or {}).get("python")
             if isinstance(latest, str) and _newer(latest, __version__):
-                print(f"[yapper] SDK {__version__} is behind the latest {latest}: pip install -U yapin, "
-                      "or download https://www.yapin.gg/sdk/yapper.py again", file=sys.stderr)
+                print(f"[yapper] SDK {__version__} is behind the latest {latest}: "
+                      "download https://www.yapin.gg/sdk/yapper.py again", file=sys.stderr)
         except Exception:
             pass  # offline or an older server: no warning
     threading.Thread(target=check, daemon=True).start()
@@ -538,8 +545,7 @@ class Button:
 
 class Select:
     """A select menu (dropdown), alone in its row: Row(Select("food").option("Pizza", "pizza").option("Taco", "taco")).
-    Picks come to on_select with i.values. Up to 25 options; min/max picks default to 1. In a Modal give it a label.
-    In testing (flag bot_selects)."""
+    Picks come to on_select with i.values. Up to 25 options; min/max picks default to 1. In a Modal give it a label."""
 
     def __init__(self, custom_id, options=None):
         self.data = {"type": "select", "custom_id": str(custom_id), "options": [_plain(o) for o in (options or [])]}
@@ -642,7 +648,7 @@ class TextInput:
 class Modal:
     """A form that pops up for the person: i.show_modal(Modal("apply", "Apply", TextInput.paragraph("why", "Why?"))).
     Up to 5 inputs (TextInput, or Select with a label). It comes back to on_modal("apply") with i.values.
-    Only as the first answer to a click, a pick or a /command (msg.show_modal). In testing (flag bot_modals)."""
+    Only as the first answer to a click, a pick or a /command (msg.show_modal)."""
 
     def __init__(self, custom_id, title, *inputs):
         self.custom_id = str(custom_id)
@@ -789,12 +795,144 @@ class Container:
         return {**self.data, "components": [_plain(text(p) if isinstance(p, str) else p) for p in self.parts]}
 
 
+# ---- command options (in testing, flag bot_command_options) ----
+
+_OPT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def _choice(c):
+    return c if isinstance(c, dict) else {"name": str(c), "value": c}
+
+
+def _option_hint(o):
+    if o.get("choices"):
+        return "one of: " + ", ".join(str(_choice(c)["value"]) for c in o["choices"])
+    return {"integer": "a whole number", "number": "a number", "boolean": "yes or no", "user": "@someone",
+            "channel": "#channel", "role": "@role"}.get(o.get("type") or "string", "text")
+
+
+def command_usage(name, options=()):
+    """"/ban <user> [reason…]": how to type a command, from its options. Required in <>, optional in []."""
+    parts = []
+    for i, o in enumerate(options):
+        rest = "…" if i == len(options) - 1 and (o.get("type") or "string") == "string" and not o.get("choices") else ""
+        inner = "|".join(str(_choice(c)["value"]) for c in o["choices"]) if o.get("choices") else f"{o['name']}{rest}"
+        parts.append(f"<{inner}>" if o.get("required") else f"[{inner}]")
+    return f"/{name}" + (" " + " ".join(parts) if parts else "")
+
+
+def _option_value(o, word):
+    """One typed word as the value of one option: (value, None) or (None, error)."""
+    name, kind = o["name"], o.get("type") or "string"
+    if o.get("choices"):
+        choices = list(map(_choice, o["choices"]))
+        for c in choices:
+            if str(c["value"]).lower() == word.lower():
+                return c["value"], None
+        for c in choices:
+            if str(c.get("name", c["value"])).lower() == word.lower():
+                return c["value"], None
+        return None, f"{name} must be {_option_hint(o)}"
+    if kind == "integer":
+        return (int(word), None) if re.fullmatch(r"-?\d{1,15}", word, re.A) else (None, f"{name} must be a whole number")
+    if kind == "number":
+        if not re.fullmatch(r"-?(\d{1,15}(\.\d{0,15})?|\.\d{1,15})", word, re.A):
+            return None, f"{name} must be a number"
+        n = float(word)
+        return (int(n) if n.is_integer() and "." not in word else n), None
+    if kind == "boolean":
+        if re.fullmatch(r"true|yes|y|on|1", word, re.I):
+            return True, None
+        if re.fullmatch(r"false|no|n|off|0", word, re.I):
+            return False, None
+        return None, f"{name} must be yes or no"
+    if kind in ("user", "role", "channel"):
+        opener = {"user": "<@!?", "role": "<@&", "channel": "<#"}[kind]
+        m = re.fullmatch(f"(?:{opener}({_OPT_ID})>|({_OPT_ID}))", word, re.I)
+        if m:
+            return (m.group(1) or m.group(2)).lower(), None
+        return None, {"user": f"{name} must be a person: @mention them", "role": f"{name} must be a role: @mention it",
+                      "channel": f"{name} must be a channel: pick it with #"}[kind]
+    return word, None
+
+
+_NAMED = re.compile(r'\s*([a-z0-9_-]{1,32})=(?:"((?:[^"\\]|\\[\s\S])*)"|(\S*))')
+
+
+def _named_args(options, args):
+    """Values by name, the way the app's form sends them: user=<@id> days=7 reason="spam and \\"ads\\"". Only when the
+    whole text is name=value pairs of this command's options, each at most once; anything else is read by position.
+    A dict, or None."""
+    if not args.strip():
+        return None
+    names = {o["name"] for o in options}
+    out, rest = {}, args
+    while rest.strip():
+        m = _NAMED.match(rest)
+        if not m or m.group(1) not in names or m.group(1) in out:
+            return None
+        after = rest[m.end():]
+        if after and not re.match(r"\s", after):
+            return None
+        out[m.group(1)] = re.sub(r"\\([\s\S])", r"\1", m.group(2)) if m.group(2) is not None else m.group(3)
+        rest = after
+    return out
+
+
+def parse_options(options=(), args=""):
+    """Turn the text after a command into values by name, by position: one word each, and a last text option
+    takes the rest of the line. Returns (values, None) or (None, error), the error in words for the person who
+    typed it. user, channel and role give the id. The SDK does this for you: handlers read msg.options."""
+    values, rest = {}, str(args or "").strip()
+    options = list(options)
+    named = _named_args(options, rest)
+    if named is not None:
+        for o in options:
+            raw = (named.get(o["name"]) or "").strip()
+            if not raw:
+                if o.get("required"):
+                    return None, f"Missing {o['name']} ({_option_hint(o)})"
+                continue
+            if (o.get("type") or "string") == "string" and not o.get("choices"):
+                value, err = raw, None
+            elif re.search(r"\s", raw):
+                value, err = None, f"{o['name']} must be {_option_hint(o)}"
+            else:
+                value, err = _option_value(o, raw)
+            if err:
+                return None, err
+            values[o["name"]] = value
+        return values, None
+    for i, o in enumerate(options):
+        last = i == len(options) - 1
+        whole = last and (o.get("type") or "string") == "string" and not o.get("choices")
+        m = re.match(r"(\S+)\s*", rest)
+        word = rest if whole else (m.group(1) if m else "")
+        if not word:
+            if o.get("required"):
+                return None, f"Missing {o['name']} ({_option_hint(o)})"
+            continue
+        value, err = _option_value(o, word)
+        if err:
+            # An optional value that doesn't fit is taken as left out: the word is tried on the next option.
+            if o.get("required") or last:
+                return None, err
+            continue
+        values[o["name"]] = value
+        rest = "" if whole else rest[m.end():]
+    if rest:
+        # Never echo what was typed: the bot posts this text, and it could be made to ping someone or say anything.
+        return None, "Too many values"
+    return values, None
+
+
 # ---- decorators for cogs (on a Cog's methods) ----
 
-def command(name=None, description=""):
-    """Marks a Cog method as a command: @yapper.command("joke", "Tell a joke"). Leave out the name to use the method's."""
+def command(name=None, description="", options=None):
+    """Marks a Cog method as a command: @yapper.command("joke", "Tell a joke"). Leave out the name to use the method's.
+    options: what it takes, like bot.command."""
     def deco(fn):
-        fn.__yapper_command__ = (name or fn.__name__, description)
+        fn.__yapper_command__ = (name or fn.__name__, description, options)
         return fn
     return deco
 
@@ -900,9 +1038,7 @@ class _WebSocket:
         try:
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if tls:
-                context = ssl.create_default_context()
-                context.minimum_version = ssl.TLSVersion.TLSv1_2
-                self.sock = context.wrap_socket(self.sock, server_hostname=u.hostname)
+                self.sock = ssl.create_default_context().wrap_socket(self.sock, server_hostname=u.hostname)
             key = base64.b64encode(os.urandom(16)).decode()
             host = u.hostname if port == (443 if tls else 80) else f"{u.hostname}:{port}"
             self.sock.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -1020,8 +1156,8 @@ class Bot:
     def __init__(self, token=None, base=None, prefixes=("/", "!"), log=True, ignore_bots=True, gateway=GATEWAY):
         """`token` defaults to the YAPPER_BOT_TOKEN environment variable (bot hosting sets it for you).
         `ignore_bots` (default True): skip messages from other bots and webhooks, so bots can't reply to each other forever.
-        `gateway` (default on): where events come from over a WebSocket; used when it's on for your bot, otherwise
-        the bot long-polls. Pass None (or False) to always poll."""
+        `gateway` (default on): events come over a WebSocket (the gateway); the bot long-polls when that is
+        down. Pass None (or False) to always poll."""
         token = (token or os.environ.get("YAPPER_BOT_TOKEN") or "").strip()
         if not token.startswith("yb_"):
             raise SystemExit("Pass your bot token (starts with yb_) or set YAPPER_BOT_TOKEN. Get one in Settings -> Developer.")
@@ -1056,14 +1192,22 @@ class Bot:
 
     # ---- registering ----
 
-    def command(self, name, description=""):
-        """Decorator: @bot.command("ping", "Is the bot alive?"). People type /ping or !ping."""
+    def command(self, name, description="", options=None):
+        """Decorator: @bot.command("ping", "Is the bot alive?"). People type /ping or !ping.
+        options (in testing, flag bot_command_options): what it takes, in the order people type it:
+            @bot.command("ban", "Ban someone", options=[{"name": "user", "type": "user", "required": True},
+                                                         {"name": "reason", "description": "Why"}])
+            def ban(msg):
+                msg.reply(f"bye <@{msg.options['user']}>")
+        Types: string (default), integer, number, boolean, user, channel, role; choices: ["a", "b"] or
+        [{"name": ..., "value": ...}]. The app shows people how to fill it in and msg.options has the values by name.
+        A wrong or missing value is answered for you with how to use the command, and your function isn't called."""
         def deco(fn):
-            self.add_command(name, description, fn)
+            self.add_command(name, description, fn, options=options)
             return fn
         return deco
 
-    def add_command(self, name, description, fn, owner=None, check=None):
+    def add_command(self, name, description, fn, owner=None, check=None, options=None):
         owner = owner or (self._loading[-1] if self._loading else None)
         n = str(name).lower().lstrip("/!")
         if not re.fullmatch(r"[a-z0-9_-]{1,32}", n):
@@ -1074,7 +1218,18 @@ class Bot:
             raise ValueError(f"Command /{n} is in both {where(old['owner'])} and {where(owner)}. Rename one of them.")
         if not old and len(self.commands) >= COMMAND_LIMIT:
             raise ValueError(f"Up to {COMMAND_LIMIT} commands per bot, /{n} is one too many")
-        self.commands[n] = {"description": str(description or "")[:100], "fn": fn, "owner": owner, "check": check}
+        opts, optional = [], False
+        for o in options or []:
+            o = dict(o, name=str(o.get("name") or "").lower())
+            if not re.fullmatch(r"[a-z0-9_-]{1,32}", o["name"]) or o["name"] in ("__proto__", "constructor", "prototype"):
+                raise ValueError(f'Command /{n}: bad option name "{o["name"]}" (letters, numbers, - and _ only)')
+            if o.get("required") and optional:
+                raise ValueError(f'Command /{n}: required option "{o["name"]}" has to come before the optional ones')
+            optional = optional or not o.get("required")
+            opts.append(o)
+        if len(opts) > 10:
+            raise ValueError(f"Command /{n}: up to 10 options")
+        self.commands[n] = {"description": str(description or "")[:100], "fn": fn, "owner": owner, "check": check, "options": opts}
         if owner:
             owner.commands.add(n)
         self._dirty = True
@@ -1083,7 +1238,8 @@ class Bot:
     def on(self, event, fn=None):
         """Listen for an event: bot.on("member_join", fn), or as a decorator @bot.on("member_join").
         Events: message, command, dm_message, member_join, member_leave, reaction_add, reaction_remove, voice_join,
-        voice_leave, invite_create, invite_delete, interaction, test, ready, error.
+        voice_leave, invite_create, invite_delete, interaction, message_update, message_delete,
+        message_delete_bulk, server_add, server_remove, test, ready, error.
         member_join also has invite_code and inviter_id when known (bots with Manage Server).
         dm_message is someone DMing the bot: a Message whose reply / say answer in the DM, with msg.dm = True."""
         def deco(f):
@@ -1142,7 +1298,7 @@ class Bot:
 
     def on_select(self, custom_id, fn=None):
         """Handle picks in your select menus with this custom_id (string or regex): i.values is the list of picked
-        values. Answer like a click, or open a form with i.show_modal(modal). In testing (flag bot_selects)."""
+        values. Answer like a click, or open a form with i.show_modal(modal)."""
         def deco(f):
             label = custom_id.pattern if isinstance(custom_id, re.Pattern) else custom_id
             self._add_button({"match": custom_id, "fn": f, "label": label, "kind": "select"})
@@ -1151,7 +1307,7 @@ class Bot:
 
     def on_modal(self, custom_id, fn=None):
         """Handle your modals being sent back, by the modal's custom_id (string or regex): i.values maps each input's
-        custom_id to its answer (text, or a list for a select menu). In testing (flag bot_modals)."""
+        custom_id to its answer (text, or a list for a select menu)."""
         def deco(f):
             label = custom_id.pattern if isinstance(custom_id, re.Pattern) else custom_id
             self._add_button({"match": custom_id, "fn": f, "label": label, "kind": "modal_submit"})
@@ -1202,8 +1358,8 @@ class Bot:
                         continue
                     fn = getattr(cog, attr)
                     if hasattr(raw, "__yapper_command__"):
-                        n, desc = raw.__yapper_command__
-                        self.add_command(n, desc, fn, owner=owner, check=cog.check)
+                        n, desc, *more = raw.__yapper_command__
+                        self.add_command(n, desc, fn, owner=owner, check=cog.check, options=more[0] if more else None)
                     if hasattr(raw, "__yapper_listener__"):
                         ev = raw.__yapper_listener__
                         self._listeners.setdefault(ev, []).append(fn)
@@ -1418,7 +1574,11 @@ class Bot:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
-                return json.loads(raw) if raw else {}
+                out = json.loads(raw) if raw else {}
+                # The API echoes a nonce it recorded: from then on a send can be repeated safely.
+                if isinstance(out, dict) and out.get("nonce") and re.fullmatch(r"/channels/[^/]+/messages", path):
+                    self._nonce_ok = True
+                return out
         except urllib.error.HTTPError as e:
             if e.code in (502, 504) and self._fallback and not on_fallback:
                 self._use_fallback(f"answered {e.code}")
@@ -1437,7 +1597,10 @@ class Bot:
             busy = e.code == 503 and "retry_after" in err
             # A 502/503/504 from the proxy in front of us (a release swapping copies, a restart): asked once more after
             # 2 s. A 503 means nothing was done; a 502/504 may have gone through, so only GET, PUT and DELETE then.
-            again = e.code == 503 or (e.code in (502, 504) and method in ("GET", "PUT", "DELETE"))
+            # A send with a nonce the API is known to record is safe to repeat too: the same nonce never posts twice.
+            safe_post = (method == "POST" and bool(re.fullmatch(r"/channels/[^/]+/messages", path)) and getattr(self, "_nonce_ok", False)
+                         and isinstance(body, dict) and bool(body.get("nonce")))
+            again = e.code == 503 or (e.code in (502, 504) and (method in ("GET", "PUT", "DELETE") or safe_post))
             if again and not busy and not _proxy_retried and retries > 0:
                 if self.log:
                     print(f"[yapper] {method} {path} answered {e.code}, trying once more in 2s")
@@ -1455,7 +1618,8 @@ class Bot:
                     print(f"[yapper] {'busy' if busy else 'rate limited'}, retrying {method} {path} in {wait:g}s")
                 time.sleep(pause)
                 return self.api(method, path, body, timeout, retries - 1, _waited + pause)
-            raise YapperError(err.get("error") or f"{method} {path} failed ({e.code})", e.code, wait or None) from None
+            raise YapperError(err.get("error") or f"{method} {path} failed ({e.code})", e.code, wait or None,
+                              err.get("code"), err.get("permission")) from None
         except urllib.error.URLError:
             # Our API host unreachable: the website's address for 10 minutes. A GET is asked again there at once;
             # anything else isn't (it may have gone through), the next call goes there.
@@ -1474,12 +1638,12 @@ class Bot:
     # ---- messages and more ----
 
     # API reference: https://www.yapin.gg/developers/api/messages#post-channels-id-messages
-    def send(self, channel_id, content="", embeds=None, components=None, reply_to=None, files=None, sticker_id=None):
+    def send(self, channel_id, content="", embeds=None, components=None, reply_to=None, files=None, sticker_id=None, nonce=None):
         """Post a message. Embeds and buttons are plain dicts (see /developers). Returns the message.
-        files (in testing, flag bot_uploads): up to 4, each a file path, an open binary file, or ("card.png", bytes).
+        files: up to 4, each a file path, an open binary file, or ("card.png", bytes).
         Pictures, videos, sounds, TXT, PDF, ZIP, 10 MB each, 12 MB in all. Every file becomes its own message (the first one has
         the text) and is checked before it shows; content can be "" then.
-        sticker_id (in testing, flag stickers): one of the server's stickers as the whole message; content stays "".
+        sticker_id: one of the server's stickers as the whole message; content stays "".
         bot.send(ch, "Welcome!", files=[("welcome.png", png_bytes)])"""
         body = {"content": str(content or "")}
         if sticker_id:
@@ -1492,6 +1656,10 @@ class Bot:
             body["components"] = _listed(components)
         if files:
             body = _form(body, files)
+        else:
+            # A fresh id per send: when the API records it, a send that got a 502 is retried
+            # and can't post twice. Not with files: each file is its own message.
+            body["nonce"] = nonce or os.urandom(11).hex()
         return Data(self.api("POST", f"/channels/{channel_id}/messages", body).get("message") or {})
 
     # API reference: https://www.yapin.gg/developers/api/messages#post-channels-id-messages
@@ -1566,10 +1734,68 @@ class Bot:
         """Take the bot's reaction off again."""
         return self.api("DELETE", f"/channels/{channel_id}/messages/{message_id}/reactions/{urllib.parse.quote(emoji, safe='')}")
 
+    def remove_reactions(self, channel_id, message_id, emoji=None, user_id=None):
+        """Remove other people's reactions (needs Manage Messages). No emoji: every reaction on
+        the message. emoji: everyone's of that emoji. emoji and user_id: that person's. Up to 100 per call: "more" says
+        call again. Not on messages with reaction roles, a giveaway or a suggestion vote."""
+        base = f"/channels/{channel_id}/messages/{message_id}/reactions"
+        if not emoji:
+            return self.api("DELETE", base)
+        q = f"user_id={urllib.parse.quote(str(user_id), safe='')}" if user_id else "all=true"
+        return self.api("DELETE", f"{base}/{urllib.parse.quote(emoji, safe='')}?{q}")
+
     # API reference: https://www.yapin.gg/developers/api/messages#get-channels-id-messages-mid-reactions
     def reactions(self, channel_id, message_id):
         """The reactions on a message: [{emoji, count, user_ids, ...}]."""
         return [Data(r) for r in self.api("GET", f"/channels/{channel_id}/messages/{message_id}/reactions")["reactions"]]
+
+    def _mark_answered(self, iid):
+        # Interactions this bot has sent an answer for (the last 500), so a command nobody answered can be acked for it.
+        # Marked when the answer is sent, taken back (_settled) if it was refused and no other went through.
+        ids = self.__dict__.setdefault("_answered_ids", {})
+        ids[iid] = True
+        if len(ids) > 500:
+            ids.pop(next(iter(ids)), None)
+
+    def _settled(self, iid, ok):
+        oks = self.__dict__.setdefault("_ok_ids", {})
+        if ok:
+            oks[iid] = True
+            if len(oks) > 500:
+                oks.pop(next(iter(oks)), None)
+        elif iid not in oks:
+            self.__dict__.get("_answered_ids", {}).pop(iid, None)
+
+    def _auto_ack(self, data, failed):
+        """A slash command whose handler didn't answer through the interaction (it used bot.send, sent files, a check
+        said no, or it raised): tell Yapin' it was handled, so the person doesn't get "the bot didn't answer".
+        After an error they get a short note only they see, right away. Otherwise the ack waits bot.auto_ack_seconds
+        (10; 0 = at once, None = never) and is only sent if still nothing answered, so a handler that replies from a
+        thread a moment later still can. Never raises."""
+        wait = getattr(self, "auto_ack_seconds", 10)
+        answered = self.__dict__.setdefault("_answered_ids", {})
+        if not data.get("id") or not data.get("token") or wait is None or data["id"] in answered:
+            return
+
+        def ack():
+            if data["id"] in answered:
+                return
+            try:
+                self.respond(data, "ack")
+            except Exception:
+                pass  # expired, or answered another way
+
+        if failed:
+            try:
+                self.respond(data, "ephemeral", content=f"Something went wrong running /{data.get('command')}")
+            except Exception:
+                pass
+        elif wait <= 0:
+            ack()
+        else:
+            t = threading.Timer(wait, ack)
+            t.daemon = True
+            t.start()
 
     # API reference: https://www.yapin.gg/developers/api/interactions#post-interactions-id-token-callback
     def respond(self, interaction, kind, content=None, embeds=None, components=None, layout=None, modal=None):
@@ -1577,6 +1803,7 @@ class Bot:
         (modal=Modal(...), only as the first answer). layout=[...]: a Components V2 layout."""
         if not interaction or not interaction.get("id") or not interaction.get("token"):
             raise YapperError("Nothing to answer: this needs an interaction (a click, a pick, a modal or a command event)")
+        self._mark_answered(interaction["id"])
         body = {"type": kind}
         if modal is not None:
             body["modal"] = _plain(modal)
@@ -1589,7 +1816,13 @@ class Bot:
         if layout is not None:
             body["flags"] = IS_COMPONENTS_V2
             body["components"] = _listed(layout)
-        return self.api("POST", f"/interactions/{interaction['id']}/{interaction['token']}/callback", body)
+        try:
+            out = self.api("POST", f"/interactions/{interaction['id']}/{interaction['token']}/callback", body)
+        except Exception:
+            self._settled(interaction["id"], False)
+            raise
+        self._settled(interaction["id"], True)
+        return out
 
     # API reference: https://www.yapin.gg/developers/api/servers#get-servers
     def servers(self):
@@ -1710,7 +1943,7 @@ class Bot:
         path = f"/channels/{channel_id}/permissions/{user_id}" if channel_id else f"/servers/{server_id}/members/{user_id}/permissions"
         return Data(self.api("GET", path)["permissions"])
 
-    # ---- custom emojis (Manage Emoji; 30 changes a minute per bot; in testing, flag bot_emojis) ----
+    # ---- custom emojis (Manage Emoji; 30 changes a minute per bot) ----
 
     # API reference: https://www.yapin.gg/developers/api/emojis#get-servers-id-emojis
     def emojis(self, server_id):
@@ -1744,8 +1977,7 @@ class Bot:
     # API reference: https://www.yapin.gg/developers/api/emojis#get-channels-id-messages-mid-emojis
     def message_emojis(self, channel_id, message_id):
         """The custom emojis in one message (text, embeds, buttons, reactions), from any server:
-        [{id, name, animated, url, in_server, text}]. For steal emoji commands. Read Message History;
-        in testing (flag bot_emoji_lookup)."""
+        [{id, name, animated, url, in_server, text}]. For steal emoji commands. Needs Read Message History."""
         out = self.api("GET", f"/channels/{channel_id}/messages/{message_id}/emojis")
         return [Data(e) for e in (out.get("emojis") or [])]
 
@@ -1923,7 +2155,7 @@ class Bot:
         """Channel categories of a server, in order: [{id, name, position}]."""
         return [Data(c) for c in self.api("GET", f"/servers/{server_id}/channels").get("categories") or []]
 
-    # ---- webhooks (flag bot_webhooks; the bot needs Manage Webhooks in that channel) ----
+    # ---- webhooks (the bot needs Manage Webhooks in that channel) ----
     # API reference: https://www.yapin.gg/developers/api/webhooks#post-channels-id-webhooks
     def create_webhook(self, channel_id, name):
         """Make a webhook in a text channel and post through it with a name and picture per message (PluralKit style):
@@ -1968,14 +2200,19 @@ class Bot:
         return Webhook.of(data, self)
 
     # API reference: https://www.yapin.gg/developers/api/channels#post-servers-id-channels
-    def create_channel(self, server_id, name, kind="text", category_id=None):
-        """Make a channel: kind "text" or "voice", optionally in a category. Returns the channel."""
+    def create_channel(self, server_id, name, kind="text", category_id=None, private=None, role_ids=None, user_ids=None):
+        """Make a channel: kind "text" or "voice", optionally in a category. Returns the channel.
+        private=True with role_ids and / or user_ids makes it private as it is created, so a ticket is never a
+        public channel: create_channel(sid, "ticket-7", private=True, role_ids=[staff], user_ids=[opener])."""
         body = {"name": name, "kind": kind}
         if category_id:
             body["category_id"] = category_id
+        for key, value in (("private", private), ("role_ids", role_ids), ("user_ids", user_ids)):
+            if value is not None:
+                body[key] = value
         return Data(self.api("POST", f"/servers/{server_id}/channels", body).get("channel") or {})
 
-    # ---- events (in testing) ----
+    # ---- scheduled server events ----
 
     # API reference: https://www.yapin.gg/developers/api/scheduled-events#get-servers-id-events
     def events(self, server_id):
@@ -1994,15 +2231,48 @@ class Bot:
 
     # API reference: https://www.yapin.gg/developers/api/channels#patch-channels-id
     def edit_channel(self, channel_id, name=None, category_id=None, private=None, role_ids=None, read_only=None,
-                     post_role_ids=None, slowmode=None):
-        """Change a channel; what you leave out stays. Returns the channel."""
+                     post_role_ids=None, slowmode=None, user_ids=None):
+        """Change a channel; what you leave out stays. Returns the channel. user_ids: the people (not roles) who
+        can see a private channel, 50 at most, the whole list ([] takes everyone out). For ticket bots:
+        edit_channel(cid, private=True, role_ids=[staff], user_ids=[opener])."""
         body = {k: v for k, v in (("name", name), ("category_id", category_id), ("private", private), ("role_ids", role_ids),
-                                  ("read_only", read_only), ("post_role_ids", post_role_ids), ("slowmode", slowmode)) if v is not None}
+                                  ("read_only", read_only), ("post_role_ids", post_role_ids), ("slowmode", slowmode),
+                                  ("user_ids", user_ids)) if v is not None}
         return Data(self.api("PATCH", f"/channels/{channel_id}", body).get("channel") or {})
 
     # API reference: https://www.yapin.gg/developers/api/channels#delete-channels-id
     def delete_channel(self, channel_id):
         return self.api("DELETE", f"/channels/{channel_id}")
+
+    # API reference: https://www.yapin.gg/developers/api/channels#get-channels-id-threads
+    def threads(self, channel_id, limit=None):
+        """Threads in a text channel, most recently active first."""
+        return [Data(t) for t in self.api("GET", f"/channels/{channel_id}/threads" + (f"?limit={int(limit)}" if limit else "")).get("threads") or []]
+
+    # API reference: https://www.yapin.gg/developers/api/channels#post-channels-id-threads
+    def create_thread(self, channel_id, name, content=None, message_id=None, embeds=None, components=None):
+        """Start a thread in a text channel (needs Create Threads). content is its first message;
+        message_id starts it from that message. Returns {"thread", "message"}: send more with bot.send(thread["id"], ...)."""
+        body = {"name": name}
+        if content is not None:
+            body["content"] = str(content)
+        if message_id:
+            body["message_id"] = message_id
+        if embeds is not None:
+            body["embeds"] = _listed(embeds)
+        if components is not None:
+            body["components"] = _listed(components)
+        return self.api("POST", f"/channels/{channel_id}/threads", body)
+
+    # API reference: https://www.yapin.gg/developers/api/channels#patch-threads-id
+    def edit_thread(self, thread_id, name=None, locked=None, archived=None):
+        """Rename, lock or archive a thread. Left out = kept."""
+        body = {k: v for k, v in (("name", name), ("locked", locked), ("archived", archived)) if v is not None}
+        return self.api("PATCH", f"/threads/{thread_id}", body)
+
+    # API reference: https://www.yapin.gg/developers/api/channels#delete-threads-id
+    def delete_thread(self, thread_id):
+        return self.api("DELETE", f"/threads/{thread_id}")
 
     # API reference: https://www.yapin.gg/developers/api/channels#post-servers-id-categories
     def create_category(self, server_id, name):
@@ -2130,6 +2400,22 @@ class Bot:
         """A button click's dict -> an Interaction with reply / ephemeral / update / ack / user_mention."""
         return Interaction.of(data, self)
 
+    def _fill_options(self, name, c, msg):
+        """msg.options from the command's options and the typed text. False (after telling the person) when it doesn't fit."""
+        msg.options = {}
+        if not c.get("options"):
+            return True
+        values, err = parse_options(c["options"], msg.args)
+        if err is None:
+            msg.options = values
+            return True
+        text = f"{err}. Use it like this: `{command_usage(name, c['options'])}`"
+        try:
+            (msg.ephemeral if callable(getattr(msg, "ephemeral", None)) else msg.reply)(text)
+        except Exception as e:
+            self._fail(e, c.get("owner"), "/" + name)
+        return False
+
     def _owner_of(self, fn):
         for o in self._owners.values():
             if any(f is fn for _, f in o.listeners) or any(b["fn"] is fn for b in o.buttons):
@@ -2171,6 +2457,8 @@ class Bot:
                         ok = False
                         self._fail(e, c["owner"], "check")
                 if ok:
+                    ok = self._fill_options(name, c, msg)
+                if ok:
                     try:
                         c["fn"](msg)
                     except Exception as e:
@@ -2195,11 +2483,17 @@ class Bot:
                     ok = False
                     self._fail(e, c["owner"], "check")
             if ok:
+                ok = self._fill_options(msg.command, c, msg)
+            failed = False
+            if ok:
                 try:
                     c["fn"](msg)
                 except Exception as e:
+                    failed = True
                     self._fail(e, c["owner"], "/" + msg.command)
                 self._emit("command", msg)
+            # Nothing went back through the interaction (bot.send, files, a check that said no, an error): ack it.
+            self._auto_ack(data, failed)
         elif kind == "interaction":
             i = self.wrap_interaction(data)
             cid = str(data.get("custom_id") or "")
@@ -2228,7 +2522,13 @@ class Bot:
     def sync_commands(self):
         """Send the command list to Yapin’ (run() does it, and again after cogs change)."""
         self._dirty = False
-        cmds = [{"name": n, "description": c["description"]} for n, c in self.commands.items()]
+        cmds = []
+        for n, c in self.commands.items():
+            cmd = {"name": n, "description": c["description"]}
+            if c.get("options"):
+                cmd["options"] = [_clean({"name": o["name"], "description": o.get("description"), "type": o.get("type"),
+                                          "required": bool(o.get("required")), "choices": o.get("choices")}) for o in c["options"]]
+            cmds.append(cmd)
         # interactions: commands picked from the / menu come as command events (nothing posted in chat) and msg.reply
         # answers them, with "<user> used /cmd" above the answer. Typed "!cmd" still comes as a message.
         self.api("PUT", "/commands", {"commands": cmds, "interactions": True})

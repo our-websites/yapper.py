@@ -1,4 +1,5 @@
-# yapper.py
+# yapper.py 
+ [![yapper.py PyPi all time downloads](https://api.pepy.tech/badge/yapper.py)](https://pypi.org/p/yapper.py)
 
 Python library for building bots on [Yapin'](https://yapin.gg/developers).
 

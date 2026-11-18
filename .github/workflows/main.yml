@@ -69,7 +69,7 @@ jobs:
             --arg body "$RELEASE_BODY" \
             --arg repo "$REPO" \
             '{
-              username: "yapper.py releases",
+              username: "GitHub",
               content: "yapper.py \($version) is out on PyPI: `pip install -U yapper.py`",
               embeds: [{
                 title: $title,

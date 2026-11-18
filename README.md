@@ -10,6 +10,12 @@ Python library for building bots on [Yapin'](https://yapin.gg/developers).
 pip install yapper.py
 ```
 
+Making a voice or music bot? Install the voice extras too (they add `livekit` and `cryptography`):
+
+```bash
+pip install "yapper.py[voice]"
+```
+
 Python 3.10 or newer. Prefer a single file? Download <https://yapin.gg/sdk/yapper.py> next to your bot and `import yapper`; it works without installing anything (a `.env` file is only read when `python-dotenv` is installed, which `pip install yapper.py` does for you).
 
 ## Quick start
@@ -101,11 +107,61 @@ Run it with `python bot.py`. People can now type `/ping` or `!ping`. Nothing to 
 - **Servers and members**: `servers`, `server`, `member_counts`, `channels`, `members`, `member`, `roles`, `user`, `emojis`, `invites`, `events`
 - **Roles, channels and permissions**: `add_role`, `remove_role`, `create_role`, `edit_role`, `delete_role`, `create_channel`, `edit_channel`, `delete_channel`, `create_category`, `channel_permissions`, `set_channel_permissions`, `set_everyone_perms`
 - **Moderation**: `kick`, `ban`, `unban`, `bans`, `timeout`, `set_nickname`
-- **Voice**: `voice`, `move_member`, `disconnect_member`, `join_voice`, `leave_voice`, and `await bot.connect_voice(...)` for music bots (needs `pip install livekit cryptography`)
+- **Voice**: `voice`, `move_member`, `disconnect_member`, `join_voice`, `leave_voice`, and `await bot.connect_voice(...)` for music bots (install with `pip install "yapper.py[voice]"`)
 - **Webhooks**: `create_webhook`, `webhooks`, `my_webhooks`, `send_webhook`, `delete_webhook`
 - **Presence and profile**: `set_status`, `set_profile`, `set_avatar`, `set_banner`
 
 Every method has a docstring: `help(yapper.Bot.send)`.
+
+## Telemetry (optional, off by default)
+
+yapper.py can send a small usage report so we can see which bots use the library. It is **off unless you turn it on**:
+`import yapper` never loads it, a normal install never sends anything, and it is a separate file the main library does not
+use. To turn it on:
+
+```python
+from yapper import telemetry
+
+telemetry.enable(bot)   # or: bot.load_extension("yapper.telemetry")
+```
+
+Once the bot is online, and then every 30 minutes, it sends this as JSON:
+
+- the bot's ID and username
+- command names, descriptions and options, cog and extension names, and how many listeners and buttons it has
+- how many servers the bot is in and their total member (and online) count, just the numbers
+- the yapper version, the Python version and the OS name
+
+It **never** sends your bot token, message content, the names or IDs of members, servers or channels, or anything else.
+`telemetry.preview(bot)` returns exactly what would be sent and sends nothing. To turn it off, remove the line above, call
+`telemetry.disable(bot)`, or set `YAPPER_TELEMETRY=0` (or `DO_NOT_TRACK=1`), which wins even when telemetry is loaded.
+
+### Getting approved
+
+Reports are only accepted from bots on an approved list. If yours is not on it yet, the bot prints a message the first time
+and sends nothing. To get added, [join the support server](https://www.yapin.gg/invite/pythonlibrary), ask someone to add
+your bot to the approved list, and bring:
+
+1. **your bot's ID** (the message the bot printed includes it), and
+2. **proof that yapper.py is your main SDK**: a link to your bot's source code that uses `import yapper`, or the output of
+   `telemetry.preview(bot)`, which shows the yapper version and your commands.
+
+Once you are on the list nothing else is needed: the bot asks again every 30 minutes, so there is no restart.
+
+### How we use the data
+
+We use it to see which bots are running on yapper.py and how (commands, server and member counts, library and Python
+versions), so we know what to improve and which versions still need support. It is also how bots get picked to be
+**featured**: if you want your bot featured in our Yapin' server and in this README, turn telemetry on and get approved,
+and we choose from the approved bots using the details listed above. If you do not turn it on, nothing is sent and nothing
+changes for you.
+
+Running the receiving end yourself? The server and its setup guide are in [`server/`](server/README.md).
+
+## Support
+
+Questions, bug reports, getting a bot approved for telemetry: [join the yapper.py support server](https://www.yapin.gg/invite/pythonlibrary).
+Bugs and feature requests can also go on [GitHub](https://github.com/our-websites/yapper.py/issues).
 
 ## API reference
 

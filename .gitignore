@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Telemetry server data (kept on the server, never committed)
+approved_bots.json
+telemetry_reports.jsonl

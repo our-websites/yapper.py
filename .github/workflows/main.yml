@@ -37,3 +37,51 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  notify:
+    # Tell the Yapin' webhook that a release is on PyPI. Only runs after the publish job succeeded, and only for a
+    # real release (not a manual run). Needs the repository secret YAPIN_WEBHOOK_URL; without it this job just skips.
+    needs: publish
+    if: ${{ success() && github.event_name == 'release' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post to the Yapin' webhook
+        continue-on-error: true   # a webhook hiccup must not turn a successful release red
+        env:
+          WEBHOOK_URL: ${{ secrets.YAPIN_WEBHOOK_URL }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "::notice::YAPIN_WEBHOOK_URL is not set, so the Yapin' webhook was not notified"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg title "${RELEASE_NAME:-$TAG}" \
+            --arg release_url "$RELEASE_URL" \
+            --arg pypi_url "https://pypi.org/project/yapper.py/${VERSION}/" \
+            --arg body "$RELEASE_BODY" \
+            --arg repo "$REPO" \
+            '{
+              username: "yapper.py releases",
+              content: "yapper.py \($version) is out on PyPI: `pip install -U yapper.py`",
+              embeds: [{
+                title: $title,
+                url: $release_url,
+                description: ($body[0:1000]),
+                color: 5763719,
+                fields: [
+                  {name: "PyPI", value: $pypi_url, inline: false},
+                  {name: "Source", value: "https://github.com/\($repo)", inline: false}
+                ]
+              }]
+            }' > payload.json
+          curl --fail-with-body --silent --show-error --retry 3 --retry-all-errors \
+            -X POST -H "Content-Type: application/json" --data @payload.json "$WEBHOOK_URL"
+          echo "Notified the Yapin' webhook about $VERSION"

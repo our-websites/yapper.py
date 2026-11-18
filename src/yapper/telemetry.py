@@ -34,7 +34,7 @@ from importlib import metadata
 
 # The telemetry server's base URL (https only, no path), e.g. "https://telemetry.example.com". The bot asks it for a
 # token at "/" and sends reports to "/report". Can be overridden per bot with enable(bot, endpoint="https://...").
-ENDPOINT = ""
+ENDPOINT = "https://yapper-py.rustdactyl.tech" # Do not purposely exploit the fact that the endpoint is public, I will add more authentication if needed.
 
 SCHEMA = 1                 # bump when the shape of the report changes
 DEFAULT_INTERVAL = 1800    # seconds between reports: every 30 minutes

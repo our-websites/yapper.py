@@ -34,6 +34,8 @@ import base64
 import hashlib
 import hmac
 import json
+import dotenv
+dotenv.load_dotenv()
 import os
 import re
 import sys

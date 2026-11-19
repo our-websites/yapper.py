@@ -7,7 +7,7 @@ import html
 import json
 import time
 
-from telemetry_store import assignable_roles, bot_state, can_approve, can_remove_roles, can_revoke
+from telemetry_store import assignable_roles, bot_state, can_approve, can_change_owner, can_remove_roles, can_revoke
 
 # What a report looks like (tests check this has the same shape as yapper.telemetry.collect()).
 EXAMPLE_REPORT = {
@@ -32,6 +32,8 @@ MESSAGES = {
     "approved": ("ok", "Bot approved. Its owner can now log in and copy the private key."),
     "applied": ("ok", "Application saved. Ask in the support server to get it approved; its status shows here."),
     "rotated": ("ok", "New key made. Copy it into TELEMETRY_KEY and restart your bot: the old one no longer works."),
+    "shared": ("ok", "Access saved."),
+    "unshared": ("ok", "Access removed."),
     "revoked": ("ok", "Access removed. The bot will be told on its next report."),
     "owner": ("ok", "Owner changed."),
     "role_added": ("ok", "Role saved."),
@@ -110,6 +112,8 @@ dl.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));ga
 dl.facts dt{font-size:.82rem;color:var(--muted)}
 dl.facts dd{margin:0;font-size:1.05rem}
 form.inline{display:flex;gap:.5rem;flex-wrap:wrap;align-items:end;margin:.6rem 0 0}
+label.check{flex-direction:row;align-items:center;gap:.4rem;padding-bottom:.55rem}
+label.check input{min-width:0}
 label{display:flex;flex-direction:column;gap:.25rem;font-size:.85rem;color:var(--muted)}
 input,select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:.45rem;padding:.5rem .65rem;font:inherit;min-width:12rem}
 details{margin-top:.9rem}
@@ -297,7 +301,7 @@ def _commands(report):
     return f"<details><summary>Commands ({len(cmds)})</summary><table><tbody>{rows}</tbody></table></details>"
 
 
-def owner_row(bot, csrf, now, key_box=True, claimed=False):
+def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", members=()):
     code, label = bot_state(bot, now)
     name = bot["name"] or "Unnamed bot"
     report = bot.get("last_report")
@@ -316,13 +320,31 @@ def owner_row(bot, csrf, now, key_box=True, claimed=False):
         parts.append(_commands(report))
         if report:
             parts.append(f"<details><summary>Latest report</summary><pre><code>{esc(json.dumps(report, indent=2))}</code></pre></details>")
-        if key_box and bot.get("key"):
+        if key_box and bot.get("key") and level in ("owner", "manager"):
             parts.append(f'<div class="key" data-key-for="{esc(bot["bot_id"])}"><span class="muted small">Private key</span>'
                          f'<output aria-live="polite">{"&bull;" * 24}</output><button type="button">Show key</button></div>'
                          f'<form class="inline" method="post" action="/panel/rotate-key"><input type="hidden" name="csrf" value="{esc(csrf)}">'
                          f'<input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
                          f'<button type="submit">Make a new key</button> <span class="muted small">The old key stops working right away.</span></form>')
+    if level != "owner" and code != "pending":
+        parts.insert(2, f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
+    if code != "pending" and bot["status"] == "approved" and level in ("owner", "manager"):
+        parts.append(access_section(bot, csrf, level, members))
     return f'<div class="row {code}"><div class="edge"></div><div class="in">{"".join(parts)}</div></div>'
+
+
+def access_section(bot, csrf, level, members):
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
+    rows = "".join(
+        f'<tr><td class="id">{esc(m["user_id"])}</td><td>{"Manager" if m["level"] == "manager" else "Viewer"}</td><td>'
+        + (f'<form method="post" action="/panel/unshare" class="inline">{hidden}<input type="hidden" name="user_id" value="{esc(m["user_id"])}">'
+           f'<button class="danger" type="submit">Remove</button></form>' if level == "owner" or m["level"] == "viewer" else "")
+        + "</td></tr>" for m in members)
+    options = '<option value="viewer">Viewer: can see the data</option>' + ('<option value="manager">Manager: also the key, and can add viewers</option>' if level == "owner" else "")
+    table = f'<table><tbody>{rows}</tbody></table>' if rows else '<p class="muted small">Not shared with anyone.</p>'
+    return (f'<details><summary>Who can see this bot ({len(members)})</summary>{table}'
+            f'<form class="inline" method="post" action="/panel/share">{hidden}<label>User ID<input name="user_id" required autocomplete="off"></label>'
+            f'<label>Access<select name="level">{options}</select></label><button type="submit">Add</button></form></details>')
 
 
 def staff_row(bot, role, csrf, now):
@@ -344,11 +366,14 @@ def staff_row(bot, role, csrf, now):
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
                  f'<label>Owner\'s user ID<input name="owner_id" required value="{esc(bot.get("applicant_id") or bot["claimed_owner_id"])}" autocomplete="off"></label>'
                  f'<button class="primary" type="submit">Approve</button></form>')
-    elif bot["status"] == "approved" and can_revoke(role):
+    elif bot["status"] == "approved" and can_change_owner(role):
         forms = (f'<form class="inline" method="post" action="/panel/owner">{hidden}'
                  f'<label>Owner\'s user ID<input name="owner_id" required value="{esc(bot["owner_id"])}" autocomplete="off"></label>'
-                 f'<button type="submit">Change owner</button></form>'
-                 f'<form class="inline" method="post" action="/panel/revoke">{hidden}<button class="danger" type="submit">Remove access</button></form>')
+                 f'<label class="check"><input type="checkbox" name="new_key" value="1"> Make a new key too</label>'
+                 f'<button type="submit">Switch owner</button></form>'
+                 f'<p class="muted small">Switching owner is for people who moved to a new account. It also ends any sharing the old owner set up.</p>')
+        if can_revoke(role):
+            forms += f'<form class="inline" method="post" action="/panel/revoke">{hidden}<button class="danger" type="submit">Remove access</button></form>'
     elif bot["status"] == "revoked" and can_approve(role):
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
                  f'<label>Owner\'s user ID<input name="owner_id" required value="{esc(bot["owner_id"])}" autocomplete="off"></label>'
@@ -408,18 +433,21 @@ def apply_form(csrf):
 
 def bots_tab(store, user_id, csrf, now):
     mine = store.owned_by(user_id)
+    shared = store.shared_with(user_id)
     waiting = store.waiting_for(user_id)
-    if not mine and not waiting:
+    if not mine and not waiting and not shared:
         return ('<div class="empty"><h2>No bots with telemetry</h2><p>You don\'t have any bots with telemetry on this account yet. '
                 'Turn it on in your bot with <code>telemetry.enable(bot)</code> and set <code>TELEMETRY_OWNER_ID</code> to your user ID '
                 'to see its status here before it is approved, or apply for it below.</p></div>' + apply_form(csrf))
-    return ("".join(owner_row(b, csrf, now) for b in mine) + "".join(owner_row(b, csrf, now, key_box=False, claimed=True) for b in waiting)
-            + apply_form(csrf))
+    rows = [owner_row(b, csrf, now, members=store.members(b["bot_id"]) if b["status"] == "approved" else ()) for b in mine]
+    rows += [owner_row(b, csrf, now, level=b["level"], members=store.members(b["bot_id"])) for b in shared]
+    rows += [owner_row(b, csrf, now, key_box=False, claimed=True) for b in waiting]
+    return "".join(rows) + apply_form(csrf)
 
 
 def dashboard(store, session, role, tab, message, nonce, support_url, now=None):
     now = now or time.time()
-    owns = bool(store.owned_by(session.user_id) or store.waiting_for(session.user_id))
+    owns = bool(store.owned_by(session.user_id) or store.shared_with(session.user_id) or store.waiting_for(session.user_id))
     tabs = []
     if role:
         tabs.append(("approvals", "Approvals"))

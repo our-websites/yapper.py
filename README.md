@@ -1,7 +1,7 @@
 # yapper.py 
 [![yapper.py Total Downloads](https://static.pepy.tech/personalized-badge/yapper.py?period=total&units=ABBREVIATION&left_color=BLACK&right_color=GREEN&left_text=Total+Downloads)](https://www.yapin.gg/invite/pythonlibrary)
 
-[Our Server](https://www.yapin.gg/invite/pythonlibrary)
+[![Join Our Server](https://our-websites.github.io/cdn.shapes.lol/yapin/join_server.svg)](https://www.yapin.gg/invite/pythonlibrary)
 
 Python library for building bots on [Yapin'](https://yapin.gg/developers).
 

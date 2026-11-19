@@ -244,8 +244,7 @@ class ReportTests(TelemetryCase):
         self.assertIn("python", report["runtime"])
         self.assertEqual(report["bot"], {"id": "bot1", "username": "Testy", "avatar": None, "uptime_seconds": None})
         self.assertEqual(report["extra"], {})
-        # the version written in the SDK file itself (main.py) is read from disk; the PyPI one may differ
-        self.assertEqual(report["sdk"]["yapin_version"], yapper.__version__)
+        self.assertEqual(set(report["sdk"]), {"version", "package_version"})        # the SDK's (main.py) and PyPI's, nothing else
         self.assertEqual(report["servers"], {"count": 2, "members_total": 42, "online_total": 11})
         self.assertEqual([c["name"] for c in report["commands"]], ["ban", "joke", "ping"])
         ban = report["commands"][0]
@@ -290,21 +289,11 @@ class ReportTests(TelemetryCase):
 
     def test_avatar_is_only_a_public_https_link(self):
         for me, expected in (({"avatar_url": "https://cdn.example/a.png"}, "https://cdn.example/a.png"), ({"avatar": "https://cdn.example/b.png"}, "https://cdn.example/b.png"),
-                             ({"avatar": "http://cdn.example/b.png"}, None), ({"avatar": "javascript:alert(1)"}, None), ({"avatar": "https://x/" + "a" * 400}, None), ({}, None)):
+                             ({"avatar": "http://cdn.example/b.png"}, None), ({"avatar": "javascript:alert(1)"}, None), ({"avatar": "https://x/" + "a" * 400}, None), ({}, None),
+                             ({"avatar_path": "abc/def 1.png"}, "https://files.yapper.website/avatars/abc/def%201.png"),
+                             ({"avatar": "/uploads/a.png"}, "https://www.yapin.gg/uploads/a.png"), ({"avatar": "data:image/png;base64,AAA"}, None),
+                             ({"avatar_url": "http://x/a.png", "avatar_path": "p.png"}, "https://files.yapper.website/avatars/p.png"), ({"avatar": 5}, None)):
             self.assertEqual(self.t._avatar(me), expected)
-
-    def test_sdk_version_is_read_from_the_sdk_file(self):
-        with tempfile.TemporaryDirectory() as d:
-            fake = os.path.join(d, "sdk.py")
-            open(fake, "w").write('"""doc"""\n__version__ = "9.8.7"\n')
-            mod = type(sys)("fake_sdk_for_test")
-            mod.__file__ = fake
-            sys.modules[mod.__name__] = mod
-            self.addCleanup(sys.modules.pop, mod.__name__, None)
-
-            class FakeBot:
-                __module__ = mod.__name__
-            self.assertEqual(self.t._sdk_file_version(FakeBot()), "9.8.7")
 
     def test_report_never_contains_secrets_or_identifying_names(self):
         text = json.dumps(self.t.preview(self.bot_with_stuff()))

@@ -33,6 +33,20 @@ DEFAULT_INTERVAL = 1800
 CONSOLE = "console"                             # the actor name used by the console: it can do everything an owner can
 
 
+def clean_avatar(value):
+    """A bot's picture as an https link. Older bots report Yapin's path (avatar/path.png): that lives under files.yapper.website/avatars/."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 300:
+        return None
+    value = value.strip()
+    if value.startswith("https://"):
+        return value.replace(" ", "%20")
+    if value.startswith("/") and not value.startswith("//"):
+        return "https://www.yapin.gg" + value.replace(" ", "%20")
+    if re.match(r"^[\w./~-][\w./ ~%-]*$", value) and ".." not in value and not value.startswith("//"):
+        return "https://files.yapper.website/avatars/" + value.lstrip("/").replace(" ", "%20")
+    return None
+
+
 INVITE = re.compile(r"^https://(?:www\.)?yapin\.gg/(?:invite|i|bot)/[A-Za-z0-9_-]{2,64}$")
 
 
@@ -495,9 +509,9 @@ class Store:
                 samples.append([now] + [servers.get(k) if isinstance(servers.get(k), int) else None for k in ("count", "members_total", "online_total")]
                                + [len(cmds) if isinstance(cmds, list) else None])
                 samples = samples[-MAX_SAMPLES:]
-            avatar = info.get("avatar")
+            avatar = clean_avatar(info.get("avatar"))
             bot.update(last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
-                       avatar=avatar if isinstance(avatar, str) and avatar.startswith("https://") and len(avatar) <= 300 else bot.get("avatar"),
+                       avatar=avatar or bot.get("avatar"),
                        sdk_version=str(sdk.get("version") or "")[:32] or bot["sdk_version"],
                        package_version=str(sdk.get("package_version") or "")[:32] or bot["package_version"])
             self._put(bot, members, urgent=False)

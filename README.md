@@ -170,10 +170,9 @@ changes for you.
 
 Bots built on yapper.py that opted in to telemetry and were picked by us:
 
-- <a href="https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768"><b>Shapes</b></a>
+- [**Shapes**](https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)
 
-Want yours here? Add its yapin.gg invite link on your bot's page in the telemetry panel (**My bots**, then **Invite link**):
-the panel gives you a ready-to-paste link with your bot's icon and name; pressing it opens your bot so people can add it.
+Want yours here? Save its yapin.gg invite link on your bot's page in the telemetry panel (**My bots**, then **Invite link**) and tell us in the support server; we'll add it.
 
 Running the receiving end yourself? The server and its setup guide are in [`server/`](server/README.md).
 

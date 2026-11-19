@@ -277,6 +277,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.landing_page(query)
         if path == "/panel/search":
             return self.search(query)
+        if path.startswith("/bots/"):
+            return self.bot_page(path)
         if path in ("/settings", "/panel") or path.startswith("/panel/"):
             return self.panel_page(path, query)
         if path.startswith("/api/"):
@@ -323,6 +325,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.html(200, lambda n: panel.settings_page(store, session, n, message, new_key, banner))
         role = store.role_of(me)
         shown = {}
+        slug = path[len("/panel/"):] if path.startswith("/panel/") else ""
+        if slug and slug not in panel.TAB_LABELS and role and valid_id(slug) and store.get_bot(slug):
+            bot = store.get_bot(slug)
+            store.audit_view(me, "bot.view", "manager", slug)
+            return self.html(200, lambda n: panel.page(f"{panel.bot_title(bot)} | yapper.py telemetry", panel.staff_bot_page(bot, role, session.csrf, time.time(), store), n,
+                                                       session, session.csrf, banners=banner))
 
         def make(n):
             body, tab = panel.dashboard(store, session, role, path[len("/panel/"):] if path.startswith("/panel/") else None, message, n, cfg.support_url, query=query.get("q", ""), banner_html=banner)
@@ -331,6 +339,32 @@ class Handler(BaseHTTPRequestHandler):
         self.html(200, make)
         if role:   # managers and owners can see which staff opened which tab; approvers' views are only for them
             store.audit_view(me, "page.view", "approver" if shown["tab"] == "approvals" else "manager", detail=shown["tab"])
+
+    def bot_page(self, path):
+        """/bots/<id>: a bot's data for its owner, managers and viewers. /bots/<id>/live is the part that refreshes itself."""
+        session = self.session()
+        if not session:
+            return self.redirect("/?msg=login_needed")
+        parts = path.strip("/").split("/")[1:]
+        if not parts or len(parts) > 2 or (len(parts) == 2 and parts[1] != "live") or not valid_id(parts[0]):
+            return self.reply(404, {"error": "not_found"})
+        store, me = self.store, session.user_id
+        bot_id, live = parts[0], len(parts) == 2
+        level = store.access_level(bot_id, me)
+        bot = store.get_bot(bot_id) if level else None
+        if not bot:
+            if live:
+                return self.reply(404, {"error": "not_found"})
+            if store.role_of(me) and store.get_bot(bot_id):       # the team doesn't get bots' data: they get the staff view
+                return self.redirect(f"/panel/{bot_id}")
+            return self.redirect("/panel/bots?msg=denied")
+        self.use_context(session)
+        now = time.time()
+        if live:
+            return self.html(200, lambda n: panel.bot_live(bot, now, level, link=False, poll=True).encode())
+        banner = panel.banners(store.unread_for(me), session.csrf, "/panel")
+        members = store.members(bot_id)
+        self.html(200, lambda n: panel.page(f"{panel.bot_title(bot)} | yapper.py telemetry", f"{panel.bot_page(bot, session.csrf, now, level, members)}", n, session, session.csrf, banners=banner))
 
     def search(self, query):
         session = self.session()

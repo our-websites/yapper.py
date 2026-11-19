@@ -115,6 +115,12 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
 - **Activity**: bot owners see what happened on their bot. Approvers see what was done in the approvals panel. Managers and owners also see
   who opened which tab, and who read which bot's data through an API key.
 - **Settings**: timezone (times are stored in UTC and shown in yours; UTC does no conversion) and API keys (up to 5, read-only, shown once).
-- **Invite link**: owners and managers save their bot's yapin.gg invite link on the bot's card; the panel shows a ready-to-paste
-  link with the bot's icon and name that opens the bot to add it (made from `https://yapin.gg/bot/<bot id>` when the ID is a Yapin' bot ID, like shapes-bot's `/add`), and staff get them all together under **Promo links** in Approvals.
+- **Bot pages.** Owners, managers and viewers open a bot's data at `/bots/<bot id>`; the status, numbers and growth on it refresh by themselves
+  every 30 seconds while the tab is visible. The team never sees a bot's data: `/bots/<id>` sends them to `/panel/<bot id>`, which has the status, owner,
+  owner/approval actions, activity on the bot and the README link.
+- **Invite link and README link**: owners and managers save their bot's yapin.gg link on its page. The ready-to-paste Markdown link (the bot's icon and name as one
+  link that opens the bot to add it) is made for the team only: on `/panel/<bot id>` and under **Promo links** in Approvals. It uses the saved link, or
+  `https://yapin.gg/bot/<bot id>` when the ID is a Yapin' bot ID (like shapes-bot's `/add`).
+- **Bot pictures.** Bots report their picture as Yapin' gives it (a path under `files.yapper.website/avatars/`); the panel only loads pictures from the allowed hosts.
+- **Versions.** Each bot shows two: the SDK's own version (`__version__` in `main.py`) and the PyPI package's.
 - **Report size.** `TELEMETRY_MAX_REPORT_BYTES` (default 2 GiB) applies only to bots with a valid token. Reports are read into memory, so lower it on a small host.

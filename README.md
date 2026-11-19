@@ -147,7 +147,13 @@ your bot to the approved list, and bring:
 2. **proof that yapper.py is your main SDK**: a link to your bot's source code that uses `import yapper`, or the output of
    `telemetry.preview(bot)`, which shows the yapper version and your commands.
 
-Once you are on the list nothing else is needed: the bot asks again every 30 minutes, so there is no restart.
+Add your Yapin' user ID to your `.env` as `TELEMETRY_OWNER_ID=...` (or pass `telemetry.enable(bot, owner_id="...")`) and you
+can log in to the telemetry panel right away to follow your bot's status: pending, then approved. Nothing about your bot is
+visible to anyone but you until it is approved, and then only the people who approve bots can see that it exists.
+
+Once you are approved, log in to the panel with Yapin', open your bot, click **Show key** and copy its private key into your
+`.env` as `TELEMETRY_KEY=...`, then restart your bot. The key proves reports really come from your bot, so keep it private
+like a token. The panel shows what your bot has sent and when the next report is due.
 
 ### How we use the data
 

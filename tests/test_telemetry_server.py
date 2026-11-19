@@ -748,48 +748,109 @@ class VerifiedOwnerTests(unittest.TestCase):
         self.assertTrue(self.s.check_key("b1", self.s.get_bot("b1")["key"]))
 
 class PersistenceTests(unittest.TestCase):
-    def test_data_survives_a_restart_and_the_file_is_private_json(self):
+    def test_every_bot_gets_its_own_private_file_and_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "t.json")
+            data = os.path.join(d, "telemetry_data")
             s = Store(path, owners=["boss"])
             s.approve("b1", "u1", "boss", "Name")
+            s.approve("b2", "u2", "boss")
             s.set_role("boss", "m1", "manager")
             s.share("u1", "b1", "v1", "viewer")
-            s.apply("u2", "b2")
+            s.apply("u3", "b3")
             s.record_report("b1", {"bot": {"id": "b1", "username": "Renamed"}, "servers": {"count": 7}})
             key = s.get_bot("b1")["key"]
             s.close()
+            self.assertEqual(sorted(os.listdir(data)), ["b1_data.json", "b2_data.json", "b3_data.json"])
+            self.assertEqual(sorted(os.listdir(d)), ["t.json", "telemetry_data"])                       # no temp files left behind
+            self.assertEqual(oct(os.stat(data).st_mode & 0o777), "0o700")
+            for name in os.listdir(data):
+                self.assertEqual(oct(os.stat(os.path.join(data, name)).st_mode & 0o777), "0o600", name)
             self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
-            self.assertIn("bots", json.load(open(path)))
-            self.assertEqual([f for f in os.listdir(d) if f != "t.json"], [])        # no temp files left behind
+            one = json.load(open(os.path.join(data, "b1_data.json")))
+            self.assertEqual((one["bot"]["key"], one["bot"]["last_report"]["servers"]["count"], list(one["members"])), (key, 7, ["v1"]))
+            self.assertEqual(list(json.load(open(path))), ["staff"])                                    # roles only; no bots in the main file
             s2 = Store(path, owners=["boss"])
             bot = s2.get_bot("b1")
             self.assertEqual((bot["key"], bot["name"], bot["status"], bot["last_report"]["servers"]["count"]), (key, "Renamed", "approved", 7))
-            self.assertEqual((s2.role_of("m1"), s2.access_level("b1", "v1"), s2.get_bot("b2")["applicant_id"]), ("manager", "viewer", "u2"))
+            self.assertEqual((s2.role_of("m1"), s2.access_level("b1", "v1"), s2.get_bot("b3")["applicant_id"]), ("manager", "viewer", "u3"))
+            self.assertEqual([b["bot_id"] for b in s2.shared_with("v1")], ["b1"])
+            self.assertEqual(s2.counts(), {"approved": 2, "pending": 1})
             self.assertTrue(s2.check_key("b1", key))
             s2.close()
+
+    def test_a_custom_data_folder_and_unusual_ids(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "t.json"), data_dir=os.path.join(d, "elsewhere"))
+            for bot_id in ("123456789012345678", "a.b-c_d", "x:y", "..", "UPPER"):
+                s.approve(bot_id, "u1", "boss")
+            s.close()
+            names = sorted(os.listdir(os.path.join(d, "elsewhere")))
+            self.assertIn("123456789012345678_data.json", names)
+            self.assertIn("x~3ay_data.json", names)
+            self.assertEqual(len(names), 5)
+            self.assertEqual(os.listdir(d).count("elsewhere"), 1)
+            self.assertFalse(any(os.sep in n for n in names))
+            s2 = Store(os.path.join(d, "t.json"), data_dir=os.path.join(d, "elsewhere"))
+            self.assertEqual(s2.counts(), {"approved": 5})
+            self.assertEqual(s2.get_bot("x:y")["bot_id"], "x:y")
+            s2.close()
+
+    def test_changing_one_bot_only_rewrites_that_bots_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "t.json"))
+            s.approve("a", "u1", "boss")
+            s.approve("b", "u2", "boss")
+            other = os.path.join(d, "telemetry_data", "b_data.json")
+            before = (os.stat(other).st_mtime_ns, open(other).read())
+            time.sleep(0.02)
+            s.rotate_key("a", "u1")
+            s.share("u1", "a", "v1", "viewer")
+            self.assertEqual((os.stat(other).st_mtime_ns, open(other).read()), before)
+            s.close()
 
     def test_reports_are_written_after_a_short_delay_without_closing(self):
         old, store_mod.SAVE_DELAY = store_mod.SAVE_DELAY, 0.05
         self.addCleanup(setattr, store_mod, "SAVE_DELAY", old)
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "t.json")
-            s = Store(path)
+            s = Store(os.path.join(d, "t.json"))
             s.approve("b1", "u1", "boss")
             s.record_report("b1", {"bot": {"id": "b1"}, "marker": "fresh"})
+            self.assertEqual(s.get_bot("b1")["last_report"]["marker"], "fresh")                       # visible at once
+            file = os.path.join(d, "telemetry_data", "b1_data.json")
             end = time.time() + 5
-            while time.time() < end and "fresh" not in open(path).read():
+            while time.time() < end and "fresh" not in open(file).read():
                 time.sleep(0.02)
-            self.assertIn("fresh", open(path).read())
+            self.assertIn("fresh", open(file).read())
             s.close()
 
-    def test_a_file_that_cannot_be_read_is_refused_not_overwritten(self):
+    def test_a_staff_file_that_cannot_be_read_is_refused_not_overwritten(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "t.json")
             open(path, "w").write("{this is not json")
             with self.assertRaises(RuntimeError):
                 Store(path)
             self.assertEqual(open(path).read(), "{this is not json")
+
+    def test_a_bot_file_that_cannot_be_read_is_skipped_and_never_overwritten(self):
+        import contextlib, io
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.json")
+            s = Store(path)
+            s.approve("good", "u1", "boss")
+            s.approve("bad", "u2", "boss")
+            s.close()
+            bad = os.path.join(d, "telemetry_data", "bad_data.json")
+            open(bad, "w").write("{broken")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                s2 = Store(path)
+            self.assertIn("bad_data.json", err.getvalue())
+            self.assertEqual(s2.counts(), {"approved": 1})                  # the server still starts, with the other bots
+            with self.assertRaises(RuntimeError):
+                s2.see_bot("bad", "Name", None, None, None)                # and it won't write over the broken one
+            self.assertEqual(open(bad).read(), "{broken")
+            s2.close()
 
     def test_concurrent_use_is_safe(self):
         with tempfile.TemporaryDirectory() as d:
@@ -810,6 +871,7 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(s.counts(), {"approved": 120, "pending": 120})
             s.close()
+            self.assertEqual(len(os.listdir(os.path.join(d, "telemetry_data"))), 240)
 
 
 class MultipleBotsPanelTests(Case):
@@ -1122,7 +1184,7 @@ class FilesTests(unittest.TestCase):
     def test_requirements_and_gitignore(self):
         self.assertIn("python-dotenv", (SERVER_DIR / "requirements.txt").read_text())
         ignore = (ROOT / ".gitignore").read_text()
-        for needle in ("server/.env", "telemetry.json"):
+        for needle in ("server/.env", "telemetry.json", "telemetry_data"):
             self.assertIn(needle, ignore)
 
     def test_server_does_not_import_from_the_sdk(self):

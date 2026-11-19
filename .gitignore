@@ -227,3 +227,5 @@ server/.env
 server/telemetry.json*
 server/*.secret
 telemetry.json*
+server/telemetry_data/
+telemetry_data/

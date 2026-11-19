@@ -23,7 +23,9 @@ of it (your host's proxy, Caddy, nginx, a tunnel) and set the public address as 
 
 | Request | Answer |
 | --- | --- |
-| `GET /` | The panel if you are logged in, otherwise the landing page (what telemetry is, how it is used, an example report). The only page that returns HTML |
+| `GET /` | The landing page (what telemetry is, how it is used, an example report), always: logged in people get a **Panel** button, everyone else a Log in button |
+| `GET /panel/<tab>`, `GET /settings` | The panel (tabs `approvals`, `bots`, `people`, `activity`, `team`, `stats`, `announce`; which ones you see depends on your role) and your settings (timezone, API keys) |
+| `GET /api/bots`, `/api/bots/<id>`, `/api/bots/<id>/history` | Read-only JSON for bots you own or manage, with `Authorization: Bearer uk_...` (make a key in **Settings**) |
 | `POST /` with `{"bot_id", "username", "key", "owner_id", "interval"}` | `200 {"token", "expires_in"}` for an approved bot with the right key. `403` while pending or removed, `401` when the key is missing or wrong; each comes with a message that tells the bot's owner what to do |
 | `POST /report` with `Authorization: Bearer <token>` | `204`, the report is stored and the bot's name is set from it |
 | `GET /health` | `{"ok": true}` |
@@ -75,7 +77,7 @@ Never leave it on for a real server.
 ## Console commands
 
 `status`, `list [pending|approved|removed]`, `approve <bot_id> <owner_id>`, `revoke <bot_id>`, `owner <bot_id> <user_id>`,
-`team`, `add <user_id> <manager|approver>`, `remove <user_id>`, `stop`. The console acts as an owner. It never prints keys.
+`team`, `add <user_id> <manager|approver>`, `remove <user_id>`, `find <name or id>`, `stats`, `announce all|<user> <title> | <message>`, `activity [n]`, `stop`. The console acts as an owner. It never prints keys.
 
 ## Settings
 
@@ -100,3 +102,19 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
 - Bots on older yapper.py versions don't send a key. They are told to update. To let them through while they do, set
   `TELEMETRY_REQUIRE_KEY=0` (a wrong key is still refused).
 - IP addresses are not logged or stored.
+
+
+## People, announcements, activity and settings
+
+- **Profile pictures and people.** Yapin' tells us each person's name and picture when they log in. Staff search people by username or user ID in **People**.
+  IDs are what is saved: a username is turned into an ID using logins, and an ID nobody has used yet is accepted if it matches
+  `TELEMETRY_USER_ID_PATTERN` (default digits only). A username nobody has logged in with gets "they need to log in to the panel first".
+  Pictures are only loaded from `www.yapin.gg` and `files.yapper.website` (`YAPIN_SITE_URL`, `YAPIN_FILES_URL`).
+- **Stats** (owners and managers): logins, active and new people over 24 hours, 7 and 30 days, and per day.
+- **Announcements** (owners and managers): to everyone or one person. Offline people see them the next time they open a page, until they dismiss them.
+- **Activity**: bot owners see what happened on their bot. Approvers see what was done in the approvals panel. Managers and owners also see
+  who opened which tab, and who read which bot's data through an API key.
+- **Settings**: timezone (times are stored in UTC and shown in yours; UTC does no conversion) and API keys (up to 5, read-only, shown once).
+- **Invite link**: owners and managers save their bot's yapin.gg invite link on the bot's card; the panel shows the ready-to-paste
+  `[Bot name](invite link)` line, and staff get them all together under **Promo links** in Approvals.
+- **Report size.** `TELEMETRY_MAX_REPORT_BYTES` (default 2 GiB) applies only to bots with a valid token. Reports are read into memory, so lower it on a small host.

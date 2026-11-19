@@ -166,6 +166,15 @@ versions), so we know what to improve and which versions still need support. It 
 and we choose from the approved bots using the details listed above. If you do not turn it on, nothing is sent and nothing
 changes for you.
 
+### Featured bots
+
+Bots built on yapper.py that opted in to telemetry and were picked by us:
+
+- [Shapes](https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)
+
+Want yours here? Add its yapin.gg invite link on your bot's page in the telemetry panel (**My bots**, then **Invite link**):
+the panel gives you the ready-to-paste link with your bot's name.
+
 Running the receiving end yourself? The server and its setup guide are in [`server/`](server/README.md).
 
 ## Support

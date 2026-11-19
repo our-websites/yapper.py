@@ -42,6 +42,7 @@ MESSAGES = {
     "ambiguous": ("bad", "More than one person has that username. Use their user ID."),
     "announced": ("ok", "Announcement sent. It waits for anyone who is offline until they next open the page."),
     "saved": ("ok", "Saved."),
+    "invite_saved": ("ok", "Invite link saved. Copy the promo link from the bot\'s Invite link section."),
     "key_removed": ("ok", "API key removed. It stops working right away."),
     "login_needed": ("bad", "Log in to open the panel."),
     "revoked": ("ok", "Access removed. The bot will be told on its next report."),
@@ -449,7 +450,7 @@ def growth(bot):
 
 EVENT_TEXT = {
     "bot.approve": "approved", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
-    "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
+    "bot.invite": "set the invite link of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
     "key.rotate": "made a new private key for", "role.add": "gave a role to", "role.remove": "removed the role of", "announce.send": "sent an announcement to",
     "page.view": "opened the", "apikey.create": "made an API key", "apikey.remove": "removed an API key", "api.read": "read data through the API for",
     "settings.timezone": "changed their timezone to",
@@ -516,11 +517,29 @@ def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", member
     if level != "owner" and code != "pending":
         parts.insert(2, f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
     if code != "pending" and bot["status"] == "approved" and level in ("owner", "manager"):
+        parts.append(invite_section(bot, csrf))
         parts.append(access_section(bot, csrf, level, members))
     if code not in ("pending", "removed") and _ctx.get().store:
         events = _ctx.get().store.read_audit(("approver", "manager"), bot_id=bot["bot_id"], limit=15)
         parts.append(f'<details><summary>Activity on this bot</summary>{activity_table(events, show_bot=False)}</details>')
     return f'<div class="row {code}"><div class="edge"></div><div class="in">{"".join(parts)}</div></div>'
+
+
+def promo_line(bot):
+    """The README line for a bot: a link with the bot's name that goes to its yapin.gg invite."""
+    return f'[{(bot.get("name") or bot["bot_id"]).replace("[", "(").replace("]", ")")}]({bot["invite_url"]})' if bot.get("invite_url") else ""
+
+
+def invite_section(bot, csrf):
+    """Owners and managers set the bot's yapin.gg invite link here and copy it, or the README line made from it."""
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
+    line = promo_line(bot)
+    shown = (f'<p class="muted small">Link for the README or your own page, with the bot\'s name:</p>'
+             f'<input readonly value="{esc(line)}" aria-label="Promo link"><p><a href="{esc(bot["invite_url"])}" rel="noopener">Open the invite</a></p>') if line else \
+            '<p class="muted small">Add your bot\'s yapin.gg invite link and the panel will make a ready-to-paste link with its name, for featuring.</p>'
+    return (f'<details><summary>Invite link</summary>{shown}<form class="inline" method="post" action="/panel/invite">{hidden}'
+            f'<label>yapin.gg invite link<input name="invite_url" value="{esc(bot.get("invite_url"))}" placeholder="https://www.yapin.gg/invite/yourbot" autocomplete="off"></label>'
+            f'<button type="submit">Save</button></form></details>')
 
 
 def access_section(bot, csrf, level, members):
@@ -584,6 +603,10 @@ def approvals_tab(store, role, csrf, now):
     out.append(f'<section><h2>Approved ({len(approved)})</h2>')
     out += [staff_row(b, role, csrf, now) for b in approved] or ['<div class="empty">No bots are approved yet.</div>']
     out.append("</section>")
+    promos = [promo_line(b) for b in approved if b.get("invite_url")]
+    if promos:
+        out.append('<section><h2>Promo links</h2><p class="muted small">Bots with an invite link, ready to paste into the README or the server.</p>'
+                   f'<textarea readonly rows="{min(len(promos), 12)}" aria-label="Promo links">{esc(chr(10).join(promos))}</textarea></section>')
     if revoked:
         out.append(f'<section><h2>Access removed ({len(revoked)})</h2>')
         out += [staff_row(b, role, csrf, now) for b in revoked]
@@ -637,7 +660,7 @@ def bots_tab(store, user_id, csrf, now):
 
 def people_tab(store, role, query):
     results = store.search_users(query, limit=25) if query else []
-    form = ('<form class="inline" method="get" action="/panel"><input type="hidden" name="tab" value="people">'
+    form = ('<form class="inline" method="get" action="/panel/people">'
             f'<label>Username or user ID<input name="q" value="{esc(query)}" autocomplete="off"></label><button class="primary" type="submit">Search</button></form>')
     out = ["<h2>People</h2>", '<p class="muted small">Everyone who has logged in to the panel with Yapin\', as Yapin\' told us. '
            "Anyone you add by username is saved by their user ID.</p>", form]
@@ -683,20 +706,16 @@ def announce_tab(store, csrf):
     sent = store.sent_announcements(30)
     rows = "".join(f'<tr><td class="small">{when(a["created_at"])}</td><td><b>{esc(a["title"])}</b><div class="muted">{esc(a["body"])}</div></td>'
                    f'<td>{"Everyone" if a["target"] == "all" else person(a["target"])}</td><td>{person(a["author"])}</td></tr>' for a in sent)
+    form = (f'<form method="post" action="/panel/announce"><input type="hidden" name="csrf" value="{esc(csrf)}">'
+            '<label>Send to<select name="audience"><option value="all">Everyone</option><option value="one">One person</option></select></label>'
+            '<label>Username or user ID (only for one person)<input data-people name="person" autocomplete="off"></label>'
+            '<label>Title<input name="title" maxlength="80" required></label>'
+            '<label>Message<textarea name="body" maxlength="1000" rows="4" required></textarea></label>'
+            '<button class="primary" type="submit">Send announcement</button></form>')
     return ('<h2>Announcements</h2><p class="muted">Shown at the top of the page when someone opens it. If they are offline, it waits until they do. '
-            'Everyone means people who had logged in when you sent it.</p>'
-            f'<form class="inline" method="post" action="/panel/announce"><input type="hidden" name="csrf" value="{esc(csrf)}">'
-            '<label>To<select name="audience"><option value="all">Everyone</option><option value="one">One person</option></select></label>'
-            '<label>Username or user ID (for one person)<input data-people name="person" autocomplete="off"></label>'
-            '<label>Title<input name="title" maxlength="80" required></label></form>'
-            f'<form method="post" action="/panel/announce"><input type="hidden" name="csrf" value="{esc(csrf)}"></form>'
-            + _announce_form(csrf)
+            'Everyone means people who had logged in when you sent it.</p>' + form
             + (f'<section><h3>Sent</h3><table><thead><tr><th>When</th><th>Message</th><th>To</th><th>From</th></tr></thead><tbody>{rows}</tbody></table></section>' if rows else
                '<div class="empty">Nothing sent yet.</div>'))
-
-
-def _announce_form(csrf):
-    return ""
 
 
 def activity_tab(store, role):
@@ -739,26 +758,44 @@ def settings_page(store, session, nonce, message=None, new_key=None, banner_html
     return page("Settings | yapper.py telemetry", body, nonce, session, session.csrf, banners=banner_html)
 
 
-def dashboard(store, session, role, tab, message, nonce, support_url, now=None):
-    now = now or time.time()
-    owns = bool(store.owned_by(session.user_id) or store.shared_with(session.user_id) or store.waiting_for(session.user_id))
+TAB_LABELS = {"approvals": "Approvals", "bots": "My bots", "team": "Team", "people": "People", "stats": "Stats",
+              "announce": "Announcements", "activity": "Activity"}
+
+
+def tabs_for(store, user_id, role):
+    owns = bool(store.owned_by(user_id) or store.shared_with(user_id) or store.waiting_for(user_id))
     tabs = []
     if role:
-        tabs.append(("approvals", "Approvals"))
+        tabs.append("approvals")
     if owns or not role:
-        tabs.append(("bots", "My bots"))
+        tabs.append("bots")
+    if role:
+        tabs += ["people", "activity"]
     if role in ("owner", "manager"):
-        tabs.append(("team", "Team"))
-    ids = [t for t, _ in tabs]
+        tabs += ["team", "stats", "announce"]
+    return tabs
+
+
+def dashboard(store, session, role, tab, message, nonce, support_url, now=None, query="", banner_html=""):
+    now = now or time.time()
+    ids = tabs_for(store, session.user_id, role)
     tab = tab if tab in ids else ids[0]
-    nav = "".join(f'<a href="/?tab={t}"{" aria-current=page" if t == tab else ""}>{esc(label)}</a>' for t, label in tabs)
+    nav = "".join(f'<a href="/panel/{t}"{" aria-current=page" if t == tab else ""}>{esc(TAB_LABELS[t])}</a>' for t in ids)
     if tab == "approvals":
         content = approvals_tab(store, role, session.csrf, now)
     elif tab == "team":
         content = team_tab(store, role, session.user_id, session.csrf)
+    elif tab == "people":
+        content = people_tab(store, role, query)
+    elif tab == "stats":
+        content = stats_tab(store)
+    elif tab == "announce":
+        content = announce_tab(store, session.csrf)
+    elif tab == "activity":
+        content = activity_tab(store, role)
     else:
         content = bots_tab(store, session.user_id, session.csrf, now)
     body = f'{flash(message)}<nav class="tabs" aria-label="Panel">{nav}</nav>{content}'
-    if not role and not owns:
+    if not role and "bots" in ids and len(ids) == 1:
         body += f'<p class="muted small">Need your bot on the list? Join the <a href="{esc(support_url)}">support server</a>.</p>'
-    return page("Panel | yapper.py telemetry", body, nonce, session, session.csrf)
+    return page("Panel | yapper.py telemetry", body, nonce, session, session.csrf, banners=banner_html), tab

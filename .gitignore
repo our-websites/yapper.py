@@ -222,3 +222,8 @@ __marimo__/
 # Telemetry server data (kept on the server, never committed)
 approved_bots.json
 telemetry_reports.jsonl
+
+server/.env
+server/telemetry.db*
+server/*.secret
+telemetry.db*

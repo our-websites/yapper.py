@@ -42,10 +42,9 @@ class Env:
 
     def __init__(self, approved=("bot1",), ttl=3600):
         self.tmp = tempfile.mkdtemp()
-        self.approved_path = os.path.join(self.tmp, "approved.json")
-        self.data_path = os.path.join(self.tmp, "reports.jsonl")
+        self.db_path = os.path.join(self.tmp, "telemetry.db")
+        self.cfg = server.Config("s" * 40, self.db_path, owners=["boss"], token_ttl=ttl, require_key=False)
         self.approve(*approved)
-        self.cfg = server.Config("s" * 40, self.approved_path, self.data_path, token_ttl=ttl)
         self.tel = server.make_server(self.cfg, "127.0.0.1", 0)
 
         class Api(BaseHTTPRequestHandler):
@@ -65,15 +64,16 @@ class Env:
         self.endpoint = f"http://127.0.0.1:{self.tel.server_address[1]}"
 
     def approve(self, *ids):
-        with open(self.approved_path, "w") as f:
-            json.dump({"bots": {i: {} for i in ids}}, f)
-        os.utime(self.approved_path, (time.time() + len(ids), time.time() + len(ids)))   # a changed mtime for the reload
+        """Exactly these bots are approved from now on."""
+        store = self.cfg.store
+        for bot in store.with_status("approved"):
+            if bot["bot_id"] not in ids:
+                store.revoke(bot["bot_id"])
+        for i in ids:
+            store.approve(i, "owner1", "boss")
 
     def reports(self):
-        try:
-            return [json.loads(line) for line in pathlib.Path(self.data_path).read_text().splitlines()]
-        except FileNotFoundError:
-            return []
+        return [{"report": json.loads(r["report"])} for r in self.cfg.store._all("SELECT report FROM reports ORDER BY id")]
 
     def wait_for_reports(self, n=1, timeout=5):
         end = time.time() + timeout
@@ -87,6 +87,7 @@ class Env:
         for s in (self.api, self.tel):
             s.shutdown()
             s.server_close()
+        self.cfg.store._db.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
@@ -222,6 +223,14 @@ class EnableTests(TelemetryCase):
 
 
 class ReportTests(TelemetryCase):
+    def test_landing_page_example_has_the_shape_of_a_real_report(self):
+        real = self.t.collect(self.bot_with_stuff())
+        example = server.panel.EXAMPLE_REPORT
+        self.assertEqual(set(example), set(real))
+        for key in ("sdk", "runtime", "bot", "servers"):
+            self.assertEqual(set(example[key]), set(real[key]), key)
+        self.assertEqual(set(example["commands"][0]), set(real["commands"][0]))
+
     def test_report_contents(self):
         import yapper
 
@@ -332,6 +341,33 @@ class ReportTests(TelemetryCase):
 class ApprovalTests(TelemetryCase):
     """The token handshake: only approved bots get through, the rest are told how to get approved."""
 
+    def test_private_key_from_the_environment_is_sent_and_asked_for(self):
+        self.env.cfg.require_key = True
+        bot = self.bot_with_stuff("bot1")
+        self.t.enable(bot, endpoint=self.env.endpoint)
+        out = io.StringIO()
+        os.environ.pop("TELEMETRY_KEY", None)
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(bot._yapper_telemetry.send("startup"))
+        self.assertIn("TELEMETRY_KEY", out.getvalue())
+        os.environ["TELEMETRY_KEY"] = "tk_wrong"
+        self.addCleanup(os.environ.pop, "TELEMETRY_KEY", None)
+        with contextlib.redirect_stdout(out):
+            self.assertFalse(bot._yapper_telemetry.send("startup"))
+        self.assertIn("is not right", out.getvalue())
+        os.environ["TELEMETRY_KEY"] = self.env.cfg.store.get_bot("bot1")["key"]
+        self.assertTrue(bot._yapper_telemetry.send("startup"))
+        self.assertEqual(len(self.env.reports()), 1)
+        self.t.disable(bot)
+
+    def test_owner_id_lets_the_owner_see_a_pending_bot(self):
+        bot = self.bot_with_stuff("newbot")
+        self.t.enable(bot, endpoint=self.env.endpoint, owner_id="user-5")
+        with contextlib.redirect_stdout(io.StringIO()):
+            bot._yapper_telemetry.send("startup")
+        self.assertEqual([b["bot_id"] for b in self.env.cfg.store.waiting_for("user-5")], ["newbot"])
+        self.t.disable(bot)
+
     def test_unapproved_bot_sends_nothing_and_is_told_how_to_get_approved(self):
         bot = self.bot_with_stuff("stranger-77")
         self.t.enable(bot, endpoint=self.env.endpoint)
@@ -386,7 +422,7 @@ class ApprovalTests(TelemetryCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertFalse(bot._yapper_telemetry.send("heartbeat"))
         self.assertEqual(len(self.env.reports()), 1)
-        self.assertIn("not on the telemetry approved list", out.getvalue())
+        self.assertIn("access for your bot (bot1) was removed", out.getvalue())
         self.t.disable(bot)
 
     def test_text_from_the_server_is_cleaned_before_printing(self):

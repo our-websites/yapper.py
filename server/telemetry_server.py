@@ -61,13 +61,13 @@ REVOKED = "Telemetry access for your bot ({bot_id}) was removed. Ask in the supp
 
 
 class Config:
-    def __init__(self, secret, db_path="telemetry.json", owners=(), support_url=DEFAULT_SUPPORT_URL, panel_url="",
+    def __init__(self, secret, db_path="telemetry.json", owners=(), data_dir=None, support_url=DEFAULT_SUPPORT_URL, panel_url="",
                  token_ttl=3600, trust_proxy=False, cookie_secure=None, dev_login=False, require_key=True,
                  oauth=None, host="0.0.0.0", port=8080):
         if not secret or len(secret) < 32:
             raise ValueError("TELEMETRY_SECRET must be at least 32 characters (try: python3 -c 'import secrets; print(secrets.token_hex(32))')")
         self.secret = secret.encode()
-        self.store = Store(db_path, owners)
+        self.store = Store(db_path, owners, data_dir)
         self.support_url = support_url
         self.panel_url = panel_url.rstrip("/")
         self.token_ttl = int(token_ttl)
@@ -94,7 +94,7 @@ class Config:
             secret = _stored_secret(db + ".secret")
         panel_url = g("TELEMETRY_PANEL_URL").rstrip("/")
         secure = g("TELEMETRY_COOKIE_SECURE")
-        return cls(secret, db, [o.strip() for o in g("TELEMETRY_OWNERS").split(",") if o.strip()],
+        return cls(secret, db, [o.strip() for o in g("TELEMETRY_OWNERS").split(",") if o.strip()], g("TELEMETRY_DATA_DIR") or os.path.join(os.path.dirname(db), "telemetry_data"),
                    g("TELEMETRY_SUPPORT_URL", DEFAULT_SUPPORT_URL), panel_url, g("TELEMETRY_TOKEN_TTL", "3600"),
                    g("TELEMETRY_TRUST_PROXY").lower() in TRUE, None if not secure else secure.lower() in TRUE,
                    g("TELEMETRY_DEV_LOGIN").lower() in TRUE, g("TELEMETRY_REQUIRE_KEY", "1").lower() in TRUE,

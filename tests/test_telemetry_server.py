@@ -702,6 +702,116 @@ class PanelActionTests(Case):
         self.assertIn("Active", page)
 
 
+class VerifiedOwnerTests(unittest.TestCase):
+    def setUp(self):
+        self.s = Store(":memory:", owners=["boss"])
+
+    def test_once_verified_other_bots_claiming_the_id_do_not_show_up(self):
+        self.s.see_bot("b1", None, "u1", None, None)
+        self.assertEqual(len(self.s.waiting_for("u1")), 1)            # not verified yet: the claim shows a status
+        self.s.approve("b1", "u1", "boss")                            # an approver verified u1
+        self.s.see_bot("fake", "Imposter", "u1", None, None)
+        self.assertEqual(self.s.waiting_for("u1"), [])               # u1 is verified now: claims no longer count
+        self.assertTrue(self.s.is_verified_owner("u1"))
+        self.assertFalse(self.s.is_verified_owner("u2"))
+
+    def test_verified_owners_apply_while_logged_in_for_more_bots(self):
+        self.s.approve("b1", "u1", "boss")
+        self.s.apply("u1", "b2")
+        self.s.apply("u1", "b3")
+        self.assertEqual({b["bot_id"] for b in self.s.waiting_for("u1")}, {"b2", "b3"})
+        self.s.approve("b2", "u1", "boss")
+        self.assertEqual({b["bot_id"] for b in self.s.owned_by("u1")}, {"b1", "b2"})
+
+    def test_application_rules(self):
+        self.s.apply("u1", "b1")
+        self.s.apply("u1", "b1")                                      # again is fine
+        with self.assertRaises(ValueError):
+            self.s.apply("u2", "b1")                                  # someone else got there first
+        with self.assertRaises(ValueError):
+            self.s.apply("u1", "bad id!")
+        self.s.approve("b1", "u1", "boss")
+        with self.assertRaises(ValueError):
+            self.s.apply("u3", "b1")                                  # already registered
+        for i in range(store_mod.MAX_PENDING_PER_OWNER):
+            self.s.apply("u4", f"x{i}")
+        with self.assertRaises(ValueError):
+            self.s.apply("u4", "one-too-many")
+
+    def test_an_application_beats_someone_elses_claim_for_the_same_bot(self):
+        self.s.see_bot("b1", None, "claimer", None, None)
+        self.s.apply("real", "b1")
+        bot = self.s.get_bot("b1")
+        self.assertEqual((bot["applicant_id"], bot["claimed_owner_id"]), ("real", "claimer"))
+        self.assertEqual([b["bot_id"] for b in self.s.waiting_for("real")], ["b1"])
+
+    def test_rotating_a_key_is_owner_only_and_kills_the_old_key(self):
+        self.s.approve("b1", "u1", "boss")
+        old = self.s.get_bot("b1")["key"]
+        with self.assertRaises(PermissionError):
+            self.s.rotate_key("b1", "boss")
+        self.s.rotate_key("b1", "u1")
+        self.assertFalse(self.s.check_key("b1", old))
+        self.assertTrue(self.s.check_key("b1", self.s.get_bot("b1")["key"]))
+
+    def test_old_databases_get_the_new_column(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "old.db")
+            import sqlite3
+            c = sqlite3.connect(path)
+            c.execute("CREATE TABLE bots(bot_id TEXT PRIMARY KEY, name TEXT, status TEXT NOT NULL DEFAULT 'pending', owner_id TEXT, claimed_owner_id TEXT, key TEXT, "
+                      "first_seen INTEGER, last_seen INTEGER, approved_by TEXT, approved_at INTEGER, interval INTEGER NOT NULL DEFAULT 1800, sdk_version TEXT, "
+                      "package_version TEXT, last_report_at INTEGER, last_report TEXT)")
+            c.commit(); c.close()
+            s = Store(path)
+            s.apply("u1", "b1")
+            self.assertEqual(s.get_bot("b1")["applicant_id"], "u1")
+            s._db.close()
+
+
+class MultipleBotsPanelTests(Case):
+    def test_owner_manages_several_bots_and_applies_for_more(self):
+        self.approve("b1", "own1", "One")
+        self.approve("b2", "own1", "Two")
+        text = self.view("own1")
+        self.assertEqual(text.count('data-key-for="'), 2)
+        self.assertIn("One", text)
+        self.assertIn("Two", text)
+        r = self.act("own1", "/panel/apply", bot_id="b3")
+        self.assertIn("msg=applied", r[3].getheader("Location"))
+        page = self.view("own1")
+        self.assertIn("b3", page)
+        self.assertIn("Pending approval", page)
+
+    def test_staff_see_who_applied_and_the_form_is_prefilled(self):
+        self.act("own1", "/panel/apply", bot_id="b3")
+        page = self.view("boss", "/?tab=approvals")
+        self.assertIn("applied for by", page)
+        self.assertIn('value="own1"', page)
+
+    def test_applications_need_login_and_csrf(self):
+        r = self.call("POST", "/panel/apply", raw="bot_id=zzz&csrf=x", headers={"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(r[3].getheader("Location"), "/")
+        self.assertIsNone(self.store.get_bot("zzz"))
+        self.assertIn("msg=invalid", self.act("own1", "/panel/apply", bot_id="not valid!")[3].getheader("Location"))
+
+    def test_owner_can_make_a_new_key_only_for_their_own_bot(self):
+        self.approve("b1", "own1")
+        old = self.store.get_bot("b1")["key"]
+        self.assertIn("msg=denied", self.act("someone", "/panel/rotate-key", bot_id="b1")[3].getheader("Location"))
+        self.assertIn("msg=denied", self.act("boss", "/panel/rotate-key", bot_id="b1")[3].getheader("Location"))
+        self.assertEqual(self.store.get_bot("b1")["key"], old)
+        self.assertIn("msg=rotated", self.act("own1", "/panel/rotate-key", bot_id="b1")[3].getheader("Location"))
+        self.assertNotEqual(self.store.get_bot("b1")["key"], old)
+        self.assertEqual(self.token("b1", key=old)[1]["error"], "key_invalid")
+
+    def test_an_imposter_claiming_a_verified_owner_sees_nothing_and_the_owner_sees_no_fake(self):
+        self.approve("b1", "own1")
+        self.call("POST", "/", {"bot_id": "fake", "username": "Fake", "owner_id": "own1"})
+        self.assertNotIn("Fake", self.view("own1"))
+        self.assertNotIn("Fake</h3>", self.view("imposter"))
+
+
 class ConsoleTests(unittest.TestCase):
     def setUp(self):
         self.s = Store(":memory:", owners=["boss"])

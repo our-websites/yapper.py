@@ -1227,13 +1227,25 @@ class PanelFeatureTests(Case):
             self.assertIn("msg=invalid", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url=bad)), bad)
         self.assertIn("msg=invite_saved", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")))
         page = self.view("own", "/panel/bots")
-        self.assertIn("[Promo Bot](https://www.yapin.gg/invite/promo)", page)
-        self.assertIn("[Promo Bot](https://www.yapin.gg/invite/promo)", self.view("app", "/panel/approvals"))   # staff can copy it too
+        line = '&lt;a href=&quot;https://www.yapin.gg/invite/promo&quot;&gt;&lt;b&gt;Promo Bot&lt;/b&gt;&lt;/a&gt;'
+        self.assertIn(line, page)
+        self.assertIn(line, self.view("app", "/panel/approvals"))   # staff can copy it too
         self.assertIn("msg=denied", self.location(self.act("app", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
         self.store.share("own", "b1", "v1", "viewer")
         self.assertIn("msg=denied", self.location(self.act("v1", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
         self.act("own", "/panel/invite", bot_id="b1", invite_url="")
         self.assertIsNone(self.store.get_bot("b1")["invite_url"])
+
+    def test_promo_line_is_one_link_with_icon_and_name_and_escapes_everything(self):
+        bot = {"bot_id": "5e872d4a-1892-43ce-aaae-40ecd7acd768", "name": 'Sh"apes <x>', "invite_url": None,
+               "avatar": "https://files.yapper.website/avatars/a.png"}
+        line = panel.promo_line(bot)
+        self.assertEqual(line, '<a href="https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768">'
+                               '<img src="https://files.yapper.website/avatars/a.png" width="24" height="24" alt="" align="absmiddle"> '
+                               '<b>Sh&quot;apes &lt;x&gt;</b></a>')    # made from the bot's Yapin' ID, like shapes-bot's /add
+        self.assertEqual(panel.promo_line(dict(bot, bot_id="12345")), "")                    # not a Yapin' bot ID: needs a saved link
+        self.assertIn("https://www.yapin.gg/invite/own", panel.promo_line(dict(bot, invite_url="https://www.yapin.gg/invite/own")))
+        self.assertNotIn("<img", panel.promo_line(dict(bot, avatar="http://tracker.example/x.png")))
 
     def test_pictures_only_come_from_trusted_hosts(self):
         self.assertIn("https://files.yapper.website/avatars/own.png", self.view("boss", "/panel/people?q=own"))

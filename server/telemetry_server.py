@@ -61,7 +61,7 @@ REVOKED = "Telemetry access for your bot ({bot_id}) was removed. Ask in the supp
 
 
 class Config:
-    def __init__(self, secret, db_path="telemetry.db", owners=(), support_url=DEFAULT_SUPPORT_URL, panel_url="",
+    def __init__(self, secret, db_path="telemetry.json", owners=(), support_url=DEFAULT_SUPPORT_URL, panel_url="",
                  token_ttl=3600, trust_proxy=False, cookie_secure=None, dev_login=False, require_key=True,
                  oauth=None, host="0.0.0.0", port=8080):
         if not secret or len(secret) < 32:
@@ -88,7 +88,7 @@ class Config:
         port = g("SERVER_PORT", "8080")
         if not port.isdigit() or not 0 <= int(port) <= 65535:
             raise ValueError(f"SERVER_PORT must be a port number, got {port!r}")
-        db = g("TELEMETRY_DB", "telemetry.db")
+        db = g("TELEMETRY_DB", "telemetry.json")
         secret = g("TELEMETRY_SECRET")
         if not secret:   # first start with nothing set: make one and keep it, so one command is enough
             secret = _stored_secret(db + ".secret")

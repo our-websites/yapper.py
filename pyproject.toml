@@ -35,6 +35,7 @@ voice = [
 ]
 test = [
     "coverage>=7.0",
+    "pickledb>=1.6",   # the telemetry server tests (server/) use it
 ]
 
 [project.urls]

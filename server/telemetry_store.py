@@ -33,6 +33,14 @@ DEFAULT_INTERVAL = 1800
 CONSOLE = "console"                             # the actor name used by the console: it can do everything an owner can
 
 
+INVITE = re.compile(r"^https://(?:www\.)?yapin\.gg/(?:invite|i|bot)/[A-Za-z0-9_-]{2,64}$")
+
+
+def valid_invite(value):
+    """A Yapin' invite or bot page link (https://www.yapin.gg/invite/<code>, /i/<code> or /bot/<id>)."""
+    return isinstance(value, str) and bool(INVITE.match(value))
+
+
 def valid_id(value):
     return isinstance(value, str) and bool(ID.match(value))
 
@@ -94,7 +102,7 @@ class UserLookupError(ValueError):
 def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
-           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": []}
+           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None}
     bot.update(fields)
     return bot
 
@@ -549,6 +557,18 @@ class Store:
                 raise PermissionError("That is not your bot.")
             bot, members = self._read(bot_id)
             bot["key"] = new_key()
+            self._put(bot, members)
+
+    def set_invite(self, user_id, bot_id, url):
+        """The link people use to add this bot (a yapin.gg invite). Only its owner or a manager they added; empty clears it."""
+        url = str(url or "").strip()
+        if url and not valid_invite(url):
+            raise ValueError("That must be a https://www.yapin.gg/invite/... (or /bot/...) link.")
+        with self._lock:
+            if self.access_level(bot_id, user_id) not in ("owner", "manager"):
+                raise PermissionError("That is not your bot.")
+            bot, members = self._read(bot_id)
+            bot["invite_url"] = url or None
             self._put(bot, members)
 
     def with_status(self, status):

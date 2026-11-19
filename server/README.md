@@ -78,7 +78,10 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
   own inline style and script through a per-response nonce.
 - Rate limits: 30 token requests a minute per address, 20 reports an hour per bot, 60 panel requests a minute per address.
 - The owner ID a bot sends is not verified. It only lets that person see the bot's status; data and keys go to the owner
-  set by whoever approved it.
+  set by whoever approved it, and only after they log in as that user. Once an approver has set an ID as a bot's owner it is
+  verified: bots that only *say* they belong to that ID no longer show up for them. A verified owner (or anyone logged in)
+  can have as many bots as they like and applies for more in the **My bots** tab, which records the verified ID on the
+  application. Owners can also make a new private key for a bot there; the old one stops working at once.
 - Bots on older yapper.py versions don't send a key. They are told to update. To let them through while they do, set
   `TELEMETRY_REQUIRE_KEY=0` (a wrong key is still refused).
 - IP addresses are not logged or stored.

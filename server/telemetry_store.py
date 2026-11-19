@@ -74,13 +74,15 @@ class Store:
                 CREATE TABLE IF NOT EXISTS staff(user_id TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT, added_at INTEGER);
                 CREATE TABLE IF NOT EXISTS bots(
                     bot_id TEXT PRIMARY KEY, name TEXT, status TEXT NOT NULL DEFAULT 'pending',
-                    owner_id TEXT, claimed_owner_id TEXT, key TEXT,
+                    owner_id TEXT, claimed_owner_id TEXT, applicant_id TEXT, key TEXT,
                     first_seen INTEGER, last_seen INTEGER, approved_by TEXT, approved_at INTEGER,
                     interval INTEGER NOT NULL DEFAULT 1800, sdk_version TEXT, package_version TEXT,
                     last_report_at INTEGER, last_report TEXT);
                 CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, received_at INTEGER NOT NULL, report TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS reports_by_bot ON reports(bot_id, id);
             """)
+            if "applicant_id" not in {r["name"] for r in self._db.execute("PRAGMA table_info(bots)")}:
+                self._db.execute("ALTER TABLE bots ADD COLUMN applicant_id TEXT")   # databases made before applications existed
 
     def _all(self, sql, args=()):
         with self._lock:
@@ -236,9 +238,48 @@ class Store:
         """Bots this person owns (approved or not), newest first."""
         return self._all("SELECT * FROM bots WHERE owner_id=? ORDER BY COALESCE(approved_at, first_seen) DESC", (str(user_id),))
 
+    def is_verified_owner(self, user_id):
+        """True once an approver has set this ID as the owner of a bot. From then on, bots that merely *say* they belong to
+        this person don't show up in their panel: they have to apply for a bot while logged in as themselves."""
+        return self._one("SELECT 1 AS x FROM bots WHERE owner_id=? LIMIT 1", (str(user_id),)) is not None
+
     def waiting_for(self, user_id):
-        """Pending bots whose own telemetry said this person is the owner (unverified: they only see a status)."""
-        return self._all("SELECT * FROM bots WHERE status='pending' AND owner_id IS NULL AND claimed_owner_id=? ORDER BY first_seen DESC", (str(user_id),))
+        """Pending bots this person can follow: ones they applied for while logged in, plus (unless they already are a
+        verified owner) ones whose own telemetry named them. Either way it is only a status; data comes after approval."""
+        user_id = str(user_id)
+        if self.is_verified_owner(user_id):
+            return self._all("SELECT * FROM bots WHERE status='pending' AND owner_id IS NULL AND applicant_id=? ORDER BY first_seen DESC", (user_id,))
+        return self._all("SELECT * FROM bots WHERE status='pending' AND owner_id IS NULL AND (applicant_id=? OR claimed_owner_id=?) ORDER BY first_seen DESC",
+                         (user_id, user_id))
+
+    def apply(self, user_id, bot_id, now=None):
+        """A logged-in person applies for a bot. Their ID is verified by the login, so staff see it as such."""
+        user_id, bot_id = str(user_id), str(bot_id).strip()
+        if not valid_id(bot_id):
+            raise ValueError("That does not look like a bot ID.")
+        now = int(now or time.time())
+        bot = self.get_bot(bot_id)
+        if bot and bot["status"] != "pending":
+            raise ValueError("That bot is already registered. If it is yours, ask in the support server.")
+        if bot and bot["applicant_id"] and bot["applicant_id"] != user_id:
+            raise ValueError("Someone has already applied for that bot. If it is yours, ask in the support server.")
+        mine = self._one("SELECT COUNT(*) AS n FROM bots WHERE status='pending' AND applicant_id=? AND bot_id!=?", (user_id, bot_id))["n"]
+        if mine >= MAX_PENDING_PER_OWNER:
+            raise ValueError("You have too many applications waiting. Wait for some to be approved.")
+        if bot is None:
+            if self._one("SELECT COUNT(*) AS n FROM bots WHERE status='pending'")["n"] >= MAX_PENDING_TOTAL:
+                raise ValueError("Too many applications are waiting right now. Try again later.")
+            self._run("INSERT INTO bots(bot_id, status, applicant_id, first_seen, last_seen, interval) VALUES(?,?,?,?,?,?)",
+                      (bot_id, "pending", user_id, now, now, DEFAULT_INTERVAL))
+        else:
+            self._run("UPDATE bots SET applicant_id=? WHERE bot_id=?", (user_id, bot_id))
+
+    def rotate_key(self, bot_id, user_id):
+        """A new private key for a bot, only by its owner. The old key stops working at once."""
+        bot = self.get_bot(bot_id)
+        if not bot or bot["status"] != "approved" or bot["owner_id"] != str(user_id):
+            raise PermissionError("That is not your bot.")
+        self._run("UPDATE bots SET key=? WHERE bot_id=?", (new_key(), bot["bot_id"]))
 
     def with_status(self, status):
         order = "first_seen DESC" if status == "pending" else "COALESCE(name, bot_id) COLLATE NOCASE"

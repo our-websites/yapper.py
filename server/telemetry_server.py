@@ -342,7 +342,15 @@ class Handler(BaseHTTPRequestHandler):
         role = store.role_of(me)
         tab, ok = "approvals", None
         try:
-            if path == "/panel/approve":
+            if path == "/panel/apply":
+                tab = "bots"
+                store.apply(me, form.get("bot_id", ""))
+                ok = "applied"
+            elif path == "/panel/rotate-key":
+                tab = "bots"
+                store.rotate_key(form.get("bot_id", ""), me)
+                ok = "rotated"
+            elif path == "/panel/approve":
                 if not can_approve(role):
                     raise PermissionError
                 store.approve(form.get("bot_id", ""), form.get("owner_id", ""), me)

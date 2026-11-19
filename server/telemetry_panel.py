@@ -30,6 +30,8 @@ EXAMPLE_REPORT = {
 
 MESSAGES = {
     "approved": ("ok", "Bot approved. Its owner can now log in and copy the private key."),
+    "applied": ("ok", "Application saved. Ask in the support server to get it approved; its status shows here."),
+    "rotated": ("ok", "New key made. Copy it into TELEMETRY_KEY and restart your bot: the old one no longer works."),
     "revoked": ("ok", "Access removed. The bot will be told on its next report."),
     "owner": ("ok", "Owner changed."),
     "role_added": ("ok", "Role saved."),
@@ -316,7 +318,10 @@ def owner_row(bot, csrf, now, key_box=True, claimed=False):
             parts.append(f"<details><summary>Latest report</summary><pre><code>{esc(json.dumps(report, indent=2))}</code></pre></details>")
         if key_box and bot.get("key"):
             parts.append(f'<div class="key" data-key-for="{esc(bot["bot_id"])}"><span class="muted small">Private key</span>'
-                         f'<output aria-live="polite">{"&bull;" * 24}</output><button type="button">Show key</button></div>')
+                         f'<output aria-live="polite">{"&bull;" * 24}</output><button type="button">Show key</button></div>'
+                         f'<form class="inline" method="post" action="/panel/rotate-key"><input type="hidden" name="csrf" value="{esc(csrf)}">'
+                         f'<input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
+                         f'<button type="submit">Make a new key</button> <span class="muted small">The old key stops working right away.</span></form>')
     return f'<div class="row {code}"><div class="edge"></div><div class="in">{"".join(parts)}</div></div>'
 
 
@@ -325,8 +330,10 @@ def staff_row(bot, role, csrf, now):
     name = bot["name"] or "Unnamed bot"
     meta = [f'<span class="id">{esc(bot["bot_id"])}</span>']
     if bot["status"] == "pending":
-        if bot["claimed_owner_id"]:
-            meta.append(f'<span class="muted small">says its owner is <span class="id">{esc(bot["claimed_owner_id"])}</span> (not verified)</span>')
+        if bot.get("applicant_id"):
+            meta.append(f'<span class="muted small">applied for by <span class="id">{esc(bot["applicant_id"])}</span> (logged in as them)</span>')
+        if bot["claimed_owner_id"] and bot["claimed_owner_id"] != bot.get("applicant_id"):
+            meta.append(f'<span class="muted small">bot says its owner is <span class="id">{esc(bot["claimed_owner_id"])}</span> (not verified)</span>')
         meta.append(f'<span class="muted small">first seen {when(bot["first_seen"])}</span>')
     else:
         meta.append(f'<span class="muted small">owner <span class="id">{esc(bot["owner_id"] or "not set")}</span></span>')
@@ -335,7 +342,7 @@ def staff_row(bot, role, csrf, now):
     hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
     if bot["status"] == "pending" and can_approve(role):
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
-                 f'<label>Owner\'s user ID<input name="owner_id" required value="{esc(bot["claimed_owner_id"])}" autocomplete="off"></label>'
+                 f'<label>Owner\'s user ID<input name="owner_id" required value="{esc(bot.get("applicant_id") or bot["claimed_owner_id"])}" autocomplete="off"></label>'
                  f'<button class="primary" type="submit">Approve</button></form>')
     elif bot["status"] == "approved" and can_revoke(role):
         forms = (f'<form class="inline" method="post" action="/panel/owner">{hidden}'
@@ -392,14 +399,22 @@ def team_tab(store, role, user_id, csrf):
             f'<section><table><thead><tr><th>User ID</th><th>Role</th><th></th><th></th></tr></thead><tbody>{"".join(rows)}</tbody></table></section>')
 
 
+def apply_form(csrf):
+    return (f'<section><h2>Apply for a bot</h2><p class="muted small">You can have as many bots as you like. Enter the bot\'s ID; '
+            f'because you are logged in, we know it is you who asked. Then ask in the support server, with proof that yapper.py is its main SDK.</p>'
+            f'<form class="inline" method="post" action="/panel/apply"><input type="hidden" name="csrf" value="{esc(csrf)}">'
+            f'<label>Bot ID<input name="bot_id" required autocomplete="off"></label><button class="primary" type="submit">Apply</button></form></section>')
+
+
 def bots_tab(store, user_id, csrf, now):
     mine = store.owned_by(user_id)
     waiting = store.waiting_for(user_id)
     if not mine and not waiting:
         return ('<div class="empty"><h2>No bots with telemetry</h2><p>You don\'t have any bots with telemetry on this account yet. '
                 'Turn it on in your bot with <code>telemetry.enable(bot)</code> and set <code>TELEMETRY_OWNER_ID</code> to your user ID '
-                'to see its status here before it is approved.</p></div>')
-    return "".join(owner_row(b, csrf, now) for b in mine) + "".join(owner_row(b, csrf, now, key_box=False, claimed=True) for b in waiting)
+                'to see its status here before it is approved, or apply for it below.</p></div>' + apply_form(csrf))
+    return ("".join(owner_row(b, csrf, now) for b in mine) + "".join(owner_row(b, csrf, now, key_box=False, claimed=True) for b in waiting)
+            + apply_form(csrf))
 
 
 def dashboard(store, session, role, tab, message, nonce, support_url, now=None):

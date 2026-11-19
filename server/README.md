@@ -36,12 +36,24 @@ Roles are by Yapin' user ID.
 | Role | Can |
 | --- | --- |
 | **Owner** | Everything: approve and remove bots, set bot owners, add managers and approvers, remove any role. Set with `TELEMETRY_OWNERS` |
-| **Manager** | Approve and remove bots, set bot owners, add approvers |
-| **Approver** | Approve bots, nothing else |
-| **Bot owner** | Whoever is set as a bot's owner when it is approved: sees that bot's data, when its next report is due, and its private key |
+| **Manager** | Approve and remove bots, switch bot owners, add approvers |
+| **Approver** | Approve bots and switch a bot to a new owner account (for people who moved to a new account). Nothing else |
+| **Bot owner** | Whoever is set as a bot's owner when it is approved: sees that bot's data, when its next report is due, and its private key, and can share the bot (below) |
 
 Staff see which bots exist and their status, never a bot's data or key. Someone who is staff and also owns a bot gets an extra
 **My bots** tab. Logging in with no role and no bots shows a message that you don't have any bots with telemetry.
+
+## Sharing a bot
+
+A bot's owner can give other people access from the **My bots** tab ("Who can see this bot"): a **viewer** sees the data and
+when the next report is due; a **manager** also gets the private key, can make a new one, and can add viewers. Only the owner can
+add or remove managers; anyone can leave. A bot can be shared with up to 20 people. Staff roles don't give access to a bot's data.
+
+## Switching an owner
+
+If someone moves to a new Yapin' account, an approver (or manager, or owner) enters the new user ID under **Switch owner** in the
+Approvals tab. Tick **Make a new key too** if the old account may be compromised. Switching also ends any sharing the old owner
+set up, so the new owner starts clean. The console does the same with `owner <bot_id> <user_id>`.
 
 ## Approving a bot
 

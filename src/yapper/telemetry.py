@@ -10,8 +10,10 @@ servers it is in and their total member count, the yapper version, the Python ve
 the bot token, message content, user, server or channel names or ids, or anything else.
 
 Reports are only accepted from bots on an approved list. The first time, the bot asks the telemetry server for a token
-with its (public) bot id; a bot that is not approved yet is told how to get on the list (see "Telemetry" in the README)
-and nothing is sent until it is. It tries again every 30 minutes, so approval needs no restart.
+with its bot id; a bot that is not approved yet is told how to get on the list (see "Telemetry" in the README) and
+nothing is sent until it is. Once approved, the bot's owner logs in to the server's panel, copies the bot's private key
+and sets it as TELEMETRY_KEY (environment or .env). The bot tries again every 30 minutes, so neither step needs a restart
+of anything but the bot itself.
 
 See exactly what would be sent with `telemetry.preview(bot)`. Turn it off by removing the line that loads it, calling
 `telemetry.disable(bot)`, or setting the environment variable YAPPER_TELEMETRY=0 (DO_NOT_TRACK=1 is honoured too).
@@ -128,8 +130,9 @@ class _Reporter:
     """Asks the server for a token, then sends the report, from a background thread so the bot itself is never slowed
     down or broken by it."""
 
-    def __init__(self, bot, endpoint, interval):
+    def __init__(self, bot, endpoint, interval, owner_id=None):
         self.bot, self.endpoint, self.interval = bot, endpoint, interval
+        self.owner_id = owner_id
         self.started = None
         self._stop = threading.Event()
         self._thread = None
@@ -186,19 +189,36 @@ class _Reporter:
             body = {}
         return status, body if isinstance(body, dict) else {}
 
+    def _key(self):
+        """The bot's private telemetry key: TELEMETRY_KEY in the environment (or .env). The server hands it out in its panel."""
+        return (os.environ.get("TELEMETRY_KEY") or "").strip() or None
+
+    def _owner_id(self):
+        """Your Yapin' user ID, only used so you can see your bot's status (pending, approved) in the panel before approval."""
+        owner = self.owner_id or os.environ.get("TELEMETRY_OWNER_ID") or (getattr(self.bot, "me", None) or {}).get("owner_id")
+        return str(owner).strip() if owner else None
+
     def _authenticate(self):
-        """Trade the bot's id for a short-lived token. None (with an explanation) when the bot is not approved."""
+        """Trade the bot's id (and private key) for a short-lived token. None (with an explanation) when not allowed yet."""
         me = getattr(self.bot, "me", None) or {}
         bot_id = me.get("id")
         if not bot_id:
             return None
-        status, body = self._post("/", {"bot_id": str(bot_id), "username": me.get("username"), "schema": SCHEMA, "sdk": _sdk_info(self.bot)})
+        payload = {"bot_id": str(bot_id), "username": me.get("username"), "schema": SCHEMA, "sdk": _sdk_info(self.bot),
+                   "interval": self.interval}
+        if self._key():
+            payload["key"] = self._key()
+        if self._owner_id():
+            payload["owner_id"] = self._owner_id()
+        status, body = self._post("/", payload)
         if status == 200 and isinstance(body.get("token"), str):
             self._token = body["token"]
             self._token_until = time.time() + max(60, int(body.get("expires_in") or 3600)) - 60
             return self._token
-        if status == 403:
-            self._say(_clean(body.get("message")) if isinstance(body.get("message"), str) else _NOT_APPROVED.format(bot_id=bot_id))
+        if status in (401, 403) and isinstance(body.get("message"), str):
+            self._say(_clean(body["message"]))
+        elif status == 403:
+            self._say(_NOT_APPROVED.format(bot_id=bot_id))
         else:
             self._say(f"the telemetry server answered {status}; will try again later")
         return None
@@ -221,10 +241,12 @@ class _Reporter:
             return False
 
 
-def enable(bot, endpoint=None, interval=DEFAULT_INTERVAL):
+def enable(bot, endpoint=None, interval=DEFAULT_INTERVAL, owner_id=None):
     """Turn telemetry on for this bot. Returns True when it is on, False when YAPPER_TELEMETRY=0 / DO_NOT_TRACK=1 is set.
     Reports start once the bot is online. `interval` (seconds, at least 300) is the time between reports, 30 minutes by
-    default. Raises ValueError when there is no (https) endpoint."""
+    default. Once your bot is approved you get a private key in the panel: set it as TELEMETRY_KEY in your environment or
+    .env file. `owner_id` (or TELEMETRY_OWNER_ID) is your Yapin' user ID, so you can see your bot's status in the panel
+    before it is approved. Raises ValueError when there is no (https) endpoint."""
     if getattr(bot, "_yapper_telemetry", None) is not None:
         return True
     if _disabled_by_env():
@@ -232,7 +254,7 @@ def enable(bot, endpoint=None, interval=DEFAULT_INTERVAL):
             print("[yapper] telemetry is loaded but switched off by YAPPER_TELEMETRY / DO_NOT_TRACK: nothing is sent")
         return False
     url = _check_endpoint(endpoint or ENDPOINT)
-    reporter = _Reporter(bot, url, max(MIN_INTERVAL, int(interval)))
+    reporter = _Reporter(bot, url, max(MIN_INTERVAL, int(interval)), owner_id)
     bot._yapper_telemetry = reporter
     bot.on("ready", reporter._on_ready)
     if getattr(bot, "log", True):

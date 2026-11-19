@@ -80,8 +80,11 @@ Never leave it on for a real server.
 ## Settings
 
 All of them are in [`.env.example`](.env.example) with comments. Environment variables set by your host win over `.env`.
-If `TELEMETRY_SECRET` is empty one is made on first start and saved next to the database. Data lives in one SQLite file
-(`TELEMETRY_DB`); it holds the private keys, so keep it private and back it up. Bots that were approved with the first version
+If `TELEMETRY_SECRET` is empty one is made on first start and saved next to the database. Data lives in one [PickleDB](https://pypi.org/project/pickledb/) file
+(`TELEMETRY_DB`, default `telemetry.json`); it holds the private keys, so keep it private (the server creates it readable by its
+owner only) and back it up. Approvals, roles, keys and sharing are saved the moment you make them; incoming reports are batched and
+written within a few seconds. Only each bot's latest report is kept. A file the server can't read is never overwritten: it stops
+with an error so you can fix or move it. Bots that were approved with the first version
 of this server (`approved_bots.json`) are imported once on start; set their owners in the panel.
 
 ## Know this

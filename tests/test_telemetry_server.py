@@ -77,10 +77,10 @@ class Case(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.mock = MockYapin()
         self.addCleanup(self.mock.close)
-        self.cfg = S.Config(SECRET, os.path.join(self.tmp.name, "t.db"), owners=["boss"], support_url="https://example.test/support",
+        self.cfg = S.Config(SECRET, os.path.join(self.tmp.name, "t.json"), owners=["boss"], support_url="https://example.test/support",
                             panel_url="", require_key=self.require_key, dev_login=self.dev_login)
         self.store = self.cfg.store
-        self.addCleanup(self.store._db.close)
+        self.addCleanup(self.store.close)
         self.srv = S.make_server(self.cfg, "127.0.0.1", 0)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
         self.addCleanup(self.srv.server_close)
@@ -224,13 +224,6 @@ class StoreTests(unittest.TestCase):
         for i in range(15):
             self.s.see_bot(f"b{i}", None, "spammer", None, None)
         self.assertEqual(len(self.s.waiting_for("spammer")), store_mod.MAX_PENDING_PER_OWNER)
-
-    def test_report_history_is_trimmed(self):
-        self.s.approve("b1", "u1", "boss")
-        for i in range(store_mod.KEEP_REPORTS + 20):
-            self.s.record_report("b1", {"bot": {"id": "b1"}, "n": i})
-        self.assertEqual(len(self.s._all("SELECT id FROM reports")), store_mod.KEEP_REPORTS)
-        self.assertEqual(self.s.history("b1", 1)[0]["report"]["n"], store_mod.KEEP_REPORTS + 19)
 
     def test_interval_is_clamped(self):
         self.assertEqual(self.s.see_bot("a", None, None, None, 5)["interval"], 300)
@@ -754,19 +747,69 @@ class VerifiedOwnerTests(unittest.TestCase):
         self.assertFalse(self.s.check_key("b1", old))
         self.assertTrue(self.s.check_key("b1", self.s.get_bot("b1")["key"]))
 
-    def test_old_databases_get_the_new_column(self):
+class PersistenceTests(unittest.TestCase):
+    def test_data_survives_a_restart_and_the_file_is_private_json(self):
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "old.db")
-            import sqlite3
-            c = sqlite3.connect(path)
-            c.execute("CREATE TABLE bots(bot_id TEXT PRIMARY KEY, name TEXT, status TEXT NOT NULL DEFAULT 'pending', owner_id TEXT, claimed_owner_id TEXT, key TEXT, "
-                      "first_seen INTEGER, last_seen INTEGER, approved_by TEXT, approved_at INTEGER, interval INTEGER NOT NULL DEFAULT 1800, sdk_version TEXT, "
-                      "package_version TEXT, last_report_at INTEGER, last_report TEXT)")
-            c.commit(); c.close()
+            path = os.path.join(d, "t.json")
+            s = Store(path, owners=["boss"])
+            s.approve("b1", "u1", "boss", "Name")
+            s.set_role("boss", "m1", "manager")
+            s.share("u1", "b1", "v1", "viewer")
+            s.apply("u2", "b2")
+            s.record_report("b1", {"bot": {"id": "b1", "username": "Renamed"}, "servers": {"count": 7}})
+            key = s.get_bot("b1")["key"]
+            s.close()
+            self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+            self.assertIn("bots", json.load(open(path)))
+            self.assertEqual([f for f in os.listdir(d) if f != "t.json"], [])        # no temp files left behind
+            s2 = Store(path, owners=["boss"])
+            bot = s2.get_bot("b1")
+            self.assertEqual((bot["key"], bot["name"], bot["status"], bot["last_report"]["servers"]["count"]), (key, "Renamed", "approved", 7))
+            self.assertEqual((s2.role_of("m1"), s2.access_level("b1", "v1"), s2.get_bot("b2")["applicant_id"]), ("manager", "viewer", "u2"))
+            self.assertTrue(s2.check_key("b1", key))
+            s2.close()
+
+    def test_reports_are_written_after_a_short_delay_without_closing(self):
+        old, store_mod.SAVE_DELAY = store_mod.SAVE_DELAY, 0.05
+        self.addCleanup(setattr, store_mod, "SAVE_DELAY", old)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.json")
             s = Store(path)
-            s.apply("u1", "b1")
-            self.assertEqual(s.get_bot("b1")["applicant_id"], "u1")
-            s._db.close()
+            s.approve("b1", "u1", "boss")
+            s.record_report("b1", {"bot": {"id": "b1"}, "marker": "fresh"})
+            end = time.time() + 5
+            while time.time() < end and "fresh" not in open(path).read():
+                time.sleep(0.02)
+            self.assertIn("fresh", open(path).read())
+            s.close()
+
+    def test_a_file_that_cannot_be_read_is_refused_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.json")
+            open(path, "w").write("{this is not json")
+            with self.assertRaises(RuntimeError):
+                Store(path)
+            self.assertEqual(open(path).read(), "{this is not json")
+
+    def test_concurrent_use_is_safe(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Store(os.path.join(d, "t.json"))
+            errors = []
+
+            def work(n):
+                try:
+                    for i in range(30):
+                        s.see_bot(f"t{n}-{i}", "x", None, None, None)
+                        s.approve(f"a{n}-{i}", "u", "boss")
+                        s.record_report(f"a{n}-{i}", {"bot": {"id": "x"}})
+                except Exception as e:   # pragma: no cover
+                    errors.append(e)
+            threads = [threading.Thread(target=work, args=(n,)) for n in range(4)]
+            [t.start() for t in threads]
+            [t.join() for t in threads]
+            self.assertEqual(errors, [])
+            self.assertEqual(s.counts(), {"approved": 120, "pending": 120})
+            s.close()
 
 
 class MultipleBotsPanelTests(Case):
@@ -1004,9 +1047,9 @@ class ConfigTests(unittest.TestCase):
     def cfg(self, **env):
         d = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, d, True)
-        env.setdefault("TELEMETRY_DB", os.path.join(d, "t.db"))
+        env.setdefault("TELEMETRY_DB", os.path.join(d, "t.json"))
         cfg = S.Config.from_env(env)
-        self.addCleanup(cfg.store._db.close)
+        self.addCleanup(cfg.store.close)
         return cfg
 
     def test_port_and_host_come_from_the_environment(self):
@@ -1031,13 +1074,13 @@ class ConfigTests(unittest.TestCase):
     def test_a_missing_secret_is_made_once_and_kept(self):
         d = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, d, True)
-        env = {"TELEMETRY_DB": os.path.join(d, "t.db")}
+        env = {"TELEMETRY_DB": os.path.join(d, "t.json")}
         import contextlib, io
         with contextlib.redirect_stdout(io.StringIO()):
             a = S.Config.from_env(env)
         b = S.Config.from_env(env)
-        self.addCleanup(a.store._db.close)
-        self.addCleanup(b.store._db.close)
+        self.addCleanup(a.store.close)
+        self.addCleanup(b.store.close)
         self.assertEqual(a.secret, b.secret)
         self.assertEqual(oct(os.stat(env["TELEMETRY_DB"] + ".secret").st_mode & 0o777), "0o600")
         self.assertEqual(oct(os.stat(env["TELEMETRY_DB"]).st_mode & 0o777), "0o600")
@@ -1053,7 +1096,7 @@ class ConfigTests(unittest.TestCase):
         busy = S.make_server(self.cfg(TELEMETRY_SECRET=SECRET), "127.0.0.1", 0)
         self.addCleanup(busy.server_close)
         env = {"TELEMETRY_SECRET": SECRET, "SERVER_HOST": "127.0.0.1", "SERVER_PORT": str(busy.server_address[1]),
-               "TELEMETRY_DB": os.path.join(tempfile.mkdtemp(), "t.db")}
+               "TELEMETRY_DB": os.path.join(tempfile.mkdtemp(), "t.json")}
         old = dict(os.environ)
         os.environ.update(env)
         try:
@@ -1079,7 +1122,7 @@ class FilesTests(unittest.TestCase):
     def test_requirements_and_gitignore(self):
         self.assertIn("python-dotenv", (SERVER_DIR / "requirements.txt").read_text())
         ignore = (ROOT / ".gitignore").read_text()
-        for needle in ("server/.env", "telemetry.db"):
+        for needle in ("server/.env", "telemetry.json"):
             self.assertIn(needle, ignore)
 
     def test_server_does_not_import_from_the_sdk(self):

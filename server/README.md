@@ -115,6 +115,6 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
 - **Activity**: bot owners see what happened on their bot. Approvers see what was done in the approvals panel. Managers and owners also see
   who opened which tab, and who read which bot's data through an API key.
 - **Settings**: timezone (times are stored in UTC and shown in yours; UTC does no conversion) and API keys (up to 5, read-only, shown once).
-- **Invite link**: owners and managers save their bot's yapin.gg invite link on the bot's card; the panel shows the ready-to-paste
-  `[Bot name](invite link)` line, and staff get them all together under **Promo links** in Approvals.
+- **Invite link**: owners and managers save their bot's yapin.gg invite link on the bot's card; the panel shows a ready-to-paste
+  link with the bot's icon and name that opens the bot to add it (made from `https://yapin.gg/bot/<bot id>` when the ID is a Yapin' bot ID, like shapes-bot's `/add`), and staff get them all together under **Promo links** in Approvals.
 - **Report size.** `TELEMETRY_MAX_REPORT_BYTES` (default 2 GiB) applies only to bots with a valid token. Reports are read into memory, so lower it on a small host.

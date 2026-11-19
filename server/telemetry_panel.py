@@ -6,6 +6,7 @@ Everything that is not fixed text goes through esc(). The page uses a per-respon
 import contextvars
 import html
 import json
+import re
 import time
 import urllib.parse
 import zoneinfo
@@ -525,18 +526,37 @@ def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", member
     return f'<div class="row {code}"><div class="edge"></div><div class="in">{"".join(parts)}</div></div>'
 
 
+UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def invite_for(bot):
+    """The link that adds the bot: the one saved for it, else https://yapin.gg/bot/<id> when its ID is a Yapin' bot ID (a UUID),
+    the same shape shapes-bot's /add uses."""
+    if bot.get("invite_url"):
+        return bot["invite_url"]
+    return f"https://yapin.gg/bot/{bot['bot_id']}" if UUID.match(str(bot["bot_id"])) else ""
+
+
 def promo_line(bot):
-    """The README line for a bot: a link with the bot's name that goes to its yapin.gg invite."""
-    return f'[{(bot.get("name") or bot["bot_id"]).replace("[", "(").replace("]", ")")}]({bot["invite_url"]})' if bot.get("invite_url") else ""
+    """The README line for a bot: its icon and name as one link that opens the bot's page to add it. Plain HTML inside Markdown,
+    which GitHub shows with the icon at a fixed small size."""
+    url = invite_for(bot)
+    if not url:
+        return ""
+    name = html.escape(bot.get("name") or bot["bot_id"], quote=True)
+    icon = bot.get("avatar")
+    img = f'<img src="{html.escape(icon, quote=True)}" width="24" height="24" alt="" align="absmiddle"> ' if isinstance(icon, str) and icon.startswith("https://") else ""
+    return f'<a href="{html.escape(url, quote=True)}">{img}<b>{name}</b></a>'
 
 
 def invite_section(bot, csrf):
     """Owners and managers set the bot's yapin.gg invite link here and copy it, or the README line made from it."""
     hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
     line = promo_line(bot)
-    shown = (f'<p class="muted small">Link for the README or your own page, with the bot\'s name:</p>'
-             f'<input readonly value="{esc(line)}" aria-label="Promo link"><p><a href="{esc(bot["invite_url"])}" rel="noopener">Open the invite</a></p>') if line else \
-            '<p class="muted small">Add your bot\'s yapin.gg invite link and the panel will make a ready-to-paste link with its name, for featuring.</p>'
+    shown = (f'<p class="muted small">Copy this into your README or page. It shows your bot\'s icon and name, and pressing it opens the bot to add it:</p>'
+             f'<input readonly value="{esc(line)}" aria-label="Promo link"><p class="small">Preview: {line}{"" if bot.get("invite_url") else " <span class=muted>(made from the bot ID; save a link below to use another)</span>"}</p>'
+             f'<p><a href="{esc(invite_for(bot))}" rel="noopener">Open the invite</a></p>') if line else \
+            '<p class="muted small">Add your bot\'s yapin.gg link (https://yapin.gg/bot/...) and the panel will make a ready-to-paste link with its icon and name.</p>'
     return (f'<details><summary>Invite link</summary>{shown}<form class="inline" method="post" action="/panel/invite">{hidden}'
             f'<label>yapin.gg invite link<input name="invite_url" value="{esc(bot.get("invite_url"))}" placeholder="https://www.yapin.gg/invite/yourbot" autocomplete="off"></label>'
             f'<button type="submit">Save</button></form></details>')
@@ -603,7 +623,7 @@ def approvals_tab(store, role, csrf, now):
     out.append(f'<section><h2>Approved ({len(approved)})</h2>')
     out += [staff_row(b, role, csrf, now) for b in approved] or ['<div class="empty">No bots are approved yet.</div>']
     out.append("</section>")
-    promos = [promo_line(b) for b in approved if b.get("invite_url")]
+    promos = [promo_line(b) for b in approved if invite_for(b)]
     if promos:
         out.append('<section><h2>Promo links</h2><p class="muted small">Bots with an invite link, ready to paste into the README or the server.</p>'
                    f'<textarea readonly rows="{min(len(promos), 12)}" aria-label="Promo links">{esc(chr(10).join(promos))}</textarea></section>')

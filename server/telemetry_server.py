@@ -40,7 +40,7 @@ except ImportError:   # python-dotenv is in requirements.txt; real environment v
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import telemetry_auth as auth  # noqa: E402
 import telemetry_panel as panel  # noqa: E402
-from telemetry_store import CONSOLE, Store, UserLookupError, can_approve, can_change_owner, can_revoke, valid_id  # noqa: E402
+from telemetry_store import CONSOLE, ReasonRequired, Store, UserLookupError, can_approve, can_change_owner, can_revoke, valid_id  # noqa: E402
 
 DEFAULT_SUPPORT_URL = "https://www.yapin.gg/invite/pythonlibrary"
 MAX_BODY = 64 * 1024
@@ -60,6 +60,8 @@ KEY_REQUIRED = ("Your bot ({bot_id}) is approved, but it didn't send its private
                 "environment or .env file. If you are on an older yapper.py, update it (pip install -U yapper.py).")
 KEY_INVALID = ("The TELEMETRY_KEY your bot ({bot_id}) sent is not right. Copy it again from {panel} (log in with the "
                "account that owns the bot) and make sure there are no spaces or quotes around it.")
+DENIED = ("Telemetry for your bot ({bot_id}) was denied. Reason: {reason} If you have fixed that, ask in the support server ({support}) "
+          "and mention your bot's ID.")
 REVOKED = "Telemetry access for your bot ({bot_id}) was removed. Ask in the support server ({support}) if that is a mistake."
 
 
@@ -493,6 +495,12 @@ class Handler(BaseHTTPRequestHandler):
                 store.approve(bot_id, owner, me)
                 store.audit(me, "bot.approve", "approver", bot_id, owner)
                 ok = "approved"
+            elif path == "/panel/deny":
+                if not can_approve(role):
+                    raise PermissionError
+                bot = store.deny(bot_id, me, form.get("reason", ""))
+                store.audit(me, "bot.deny", "approver", bot_id, None, bot["deny_reason"])
+                ok = "bot_denied"
             elif path == "/panel/revoke":
                 if not can_revoke(role):
                     raise PermissionError
@@ -559,6 +567,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(404, {"error": "not_found"})
         except PermissionError:
             return self.redirect(f"/panel/{tab}?msg=denied")
+        except ReasonRequired:
+            return self.redirect(f"/panel/{tab}?msg=reason_needed")
         except UserLookupError as e:
             return self.redirect(f"/panel/{tab}?msg={e.code}")
         except ValueError:
@@ -596,6 +606,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, {"error": "not_approved", "status": "pending", "bot_id": bot_id, "support_server": cfg.support_url,
                                     "needed": ["your bot's ID", "proof that yapper.py is your main SDK"],
                                     "message": NOT_APPROVED.format(bot_id=bot_id, support=cfg.support_url, status=status)})
+        if bot["status"] == "denied":
+            return self.reply(403, {"error": "denied", "status": "denied", "reason": bot["deny_reason"], "support_server": cfg.support_url,
+                                    "message": DENIED.format(bot_id=bot_id, reason=bot["deny_reason"], support=cfg.support_url)})
         if bot["status"] == "revoked":
             return self.reply(403, {"error": "revoked", "status": "revoked", "support_server": cfg.support_url,
                                     "message": REVOKED.format(bot_id=bot_id, support=cfg.support_url)})
@@ -642,6 +655,7 @@ HELP = """commands:
   status                      how many bots are pending / approved
   list [pending|approved|removed]   the bots
   approve <bot_id> <owner_id>       approve a bot and set its owner
+  deny <bot_id> <reason>      say no to a waiting bot (the reason is required; its owner sees it)
   revoke <bot_id>             remove a bot's access
   owner <bot_id> <user_id>    change a bot's owner
   team                        everyone with a role
@@ -666,7 +680,7 @@ def run_command(store, line):
             return HELP
         if cmd == "status":
             c = store.counts()
-            return f"{c.get('pending', 0)} pending, {c.get('approved', 0)} approved, {c.get('revoked', 0)} removed"
+            return f"{c.get('pending', 0)} pending, {c.get('approved', 0)} approved, {c.get('denied', 0)} denied, {c.get('revoked', 0)} removed"
         if cmd == "list":
             status = {"removed": "revoked"}.get(args[0], args[0]) if args else "approved"
             bots = store.with_status(status)
@@ -675,6 +689,10 @@ def run_command(store, line):
             bot = store.approve(args[0], store.resolve_user(args[1]), CONSOLE)
             store.audit(CONSOLE, "bot.approve", "approver", bot["bot_id"], bot["owner_id"])
             return f"approved {bot['bot_id']} (owner {bot['owner_id']}); the owner can copy its key in the panel"
+        if cmd == "deny" and len(args) >= 2:
+            bot = store.deny(args[0], CONSOLE, " ".join(args[1:]))
+            store.audit(CONSOLE, "bot.deny", "approver", bot["bot_id"], None, bot["deny_reason"])
+            return f"denied {bot['bot_id']}; the owner sees the reason"
         if cmd == "revoke" and len(args) == 1:
             store.revoke(args[0])
             return f"removed {args[0]}"

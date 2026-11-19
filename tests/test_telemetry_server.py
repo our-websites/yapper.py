@@ -89,6 +89,9 @@ class Case(unittest.TestCase):
         self.cfg.oauth = self.mock.oauth(f"http://127.0.0.1:{self.port}/auth/callback")
 
     # -- helpers --
+    def location(self, response):
+        return response[3].getheader("Location")
+
     def call(self, method, path, body=None, headers=None, raw=None, user=None):
         headers = dict(headers or {})
         if user:
@@ -1083,9 +1086,6 @@ class PanelFeatureTests(Case):
         self.approve("b1", "own", "Promo Bot")
         self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot"}, "servers": {"count": 3}})
 
-    def location(self, response):
-        return response[3].getheader("Location")
-
     def test_landing_always_shows_with_a_panel_button_when_logged_in(self):
         out = self.call("GET", "/")[2]
         self.assertIn('href="/login"', out)
@@ -1342,6 +1342,77 @@ class PanelFeatureTests(Case):
         self.assertTrue(any(a["title"] == "Hello" for a in self.store.unread_for("own")))
         self.assertIn("announcement left for v1", S.run_command(self.store, "announce Viewy Psst | Just you"))
         self.assertIn("announce.send", S.run_command(self.store, "activity"))
+
+
+class DenyTests(Case):
+    """Staff can say no to a waiting bot, with a reason the owner sees."""
+
+    def setUp(self):
+        super().setUp()
+        self.store.set_role("boss", "app", "approver")
+        self.store.set_role("boss", "man", "manager")
+        self.store.record_login("own", "Owny", None)
+        self.store.apply("own", "pend1")
+        self.store.see_bot("pend1", "Pending Bot")
+
+    def test_a_reason_is_required(self):
+        for reason in ("", "   ", "no", "x" * 4):
+            self.assertIn("msg=reason_needed", self.location(self.act("app", "/panel/deny", bot_id="pend1", reason=reason)), repr(reason))
+            self.assertEqual(self.store.get_bot("pend1")["status"], "pending")
+        with self.assertRaises(S.ReasonRequired):
+            self.store.deny("pend1", "app", "")
+
+    def test_deny_with_a_reason_and_the_owner_sees_it(self):
+        self.assertIn("msg=bot_denied", self.location(self.act("app", "/panel/deny", bot_id="pend1", reason="  Not   built on yapper.py  ")))
+        bot = self.store.get_bot("pend1")
+        self.assertEqual((bot["status"], bot["deny_reason"], bot["denied_by"]), ("denied", "Not built on yapper.py", "app"))
+        page = self.view("own", "/panel/bots")
+        self.assertIn("Denied", page)
+        self.assertIn("Not built on yapper.py", page)
+        self.assertNotIn('data-key-for="', page)
+        self.assertIn("Not built on yapper.py", self.view("app", "/panel/approvals"))
+        self.assertIn("denied", self.view("app", "/panel/activity"))
+        self.assertEqual(self.store.counts()["denied"], 1)
+        self.assertEqual(self.store.with_status("pending"), [])
+
+    def test_the_bot_is_told_why(self):
+        self.act("app", "/panel/deny", bot_id="pend1", reason="Please add proof that yapper.py is your main SDK")
+        r = self.call("POST", "/", {"bot_id": "pend1"})
+        self.assertEqual(r[0], 403)
+        self.assertEqual((r[1]["error"], r[1]["status"]), ("denied", "denied"))
+        self.assertIn("Please add proof that yapper.py is your main SDK", r[1]["message"])
+        self.assertEqual(self.store.get_bot("pend1")["status"], "denied")                       # asking again doesn't bring it back
+
+    def test_only_waiting_bots_can_be_denied_and_only_by_staff_who_can_approve(self):
+        self.approve("b1", "own")
+        self.assertIn("msg=invalid", self.location(self.act("app", "/panel/deny", bot_id="b1", reason="Changed my mind")))
+        self.assertEqual(self.store.get_bot("b1")["status"], "approved")
+        self.assertIn("msg=invalid", self.location(self.act("app", "/panel/deny", bot_id="nobody", reason="Changed my mind")))
+        for user in ("own", "v1"):
+            self.assertIn("msg=denied", self.location(self.act(user, "/panel/deny", bot_id="pend1", reason="Because I said so")), user)
+        self.assertEqual(self.store.get_bot("pend1")["status"], "pending")
+        self.assertIn("msg=bot_denied", self.location(self.act("man", "/panel/deny", bot_id="pend1", reason="Because I said so")))
+
+    def test_denied_bots_can_be_approved_later_and_cannot_be_applied_for_again(self):
+        self.act("app", "/panel/deny", bot_id="pend1", reason="Missing proof of the SDK")
+        with self.assertRaises(ValueError) as ctx:
+            self.store.apply("own", "pend1")
+        self.assertIn("Missing proof of the SDK", str(ctx.exception))
+        self.assertIn("Approve anyway", self.view("app", "/panel/approvals"))
+        self.assertIn("msg=approved", self.location(self.act("app", "/panel/approve", bot_id="pend1", owner_id="own")))
+        bot = self.store.get_bot("pend1")
+        self.assertEqual((bot["status"], bot["owner_id"], bot["deny_reason"]), ("approved", "own", None))
+
+    def test_deny_is_logged_and_on_the_console(self):
+        self.act("app", "/panel/deny", bot_id="pend1", reason="Missing proof of the SDK")
+        self.assertIn(("bot.deny", "app"), [(e["kind"], e["actor"]) for e in self.store.read_audit(bot_id="pend1")])
+        self.store.see_bot("pend2", "Second")
+        self.assertIn("denied pend2", S.run_command(self.store, "deny pend2 Spam bot, not on the SDK"))
+        self.assertEqual(self.store.get_bot("pend2")["deny_reason"], "Spam bot, not on the SDK")
+        self.assertEqual(self.store.get_bot("pend1")["status"], "denied")
+        self.assertNotIn("denied pend1", S.run_command(self.store, "deny pend1"))               # no reason: it isn't done again or silently
+        self.assertIn("pend2", S.run_command(self.store, "list denied"))
+        self.assertIn("2 denied", S.run_command(self.store, "status"))
 
 
 class ConsoleTests(unittest.TestCase):

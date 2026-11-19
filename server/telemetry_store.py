@@ -92,10 +92,12 @@ def can_remove_roles(role):
 
 
 def bot_state(bot, now=None):
-    """(code, label) for where a bot stands: pending, waiting, active, quiet or removed."""
+    """(code, label) for where a bot stands: pending, denied, waiting, active, quiet or removed."""
     now = now or time.time()
     if bot["status"] == "pending":
         return "pending", "Pending approval"
+    if bot["status"] == "denied":
+        return "denied", "Denied"
     if bot["status"] == "revoked":
         return "removed", "Access removed"
     if not bot["last_report_at"]:
@@ -103,6 +105,13 @@ def bot_state(bot, now=None):
     if now - bot["last_report_at"] <= bot["interval"] * 2.2:
         return "active", "Active"
     return "quiet", "Quiet: no report for a while"
+
+
+MIN_REASON, MAX_REASON = 5, 500
+
+
+class ReasonRequired(ValueError):
+    pass
 
 
 class UserLookupError(ValueError):
@@ -116,7 +125,8 @@ class UserLookupError(ValueError):
 def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
-           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None}
+           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None,
+           "deny_reason": None, "denied_by": None, "denied_at": None}
     bot.update(fields)
     return bot
 
@@ -397,7 +407,20 @@ class Store:
             if bot is None:
                 bot, members = _new_bot(bot_id, now), {}
             bot.update(status="approved", owner_id=owner_id, key=bot["key"] or new_key(), approved_by=str(by), approved_at=now,
-                       name=bot["name"] or name)
+                       name=bot["name"] or name, deny_reason=None, denied_by=None, denied_at=None)
+            self._put(bot, members)
+            return dict(bot)
+
+    def deny(self, bot_id, by, reason, now=None):
+        """Say no to a bot that is waiting, with a reason the owner will see. A denied bot can still be approved later."""
+        reason = " ".join(str(reason or "").split())
+        if len(reason) < MIN_REASON:
+            raise ReasonRequired(f"Write a reason of at least {MIN_REASON} characters: the bot's owner sees it.")
+        with self._lock:
+            bot, members = self._read(str(bot_id).strip())
+            if not bot or bot["status"] != "pending":
+                raise ValueError("Only a bot that is waiting for approval can be denied.")
+            bot.update(status="denied", deny_reason=reason[:MAX_REASON], denied_by=str(by), denied_at=int(now or time.time()))
             self._put(bot, members)
             return dict(bot)
 
@@ -537,8 +560,8 @@ class Store:
         user_id = str(user_id)
         verified = self.is_verified_owner(user_id)
         with self._lock:
-            rows = [dict(b) for b in self._pending()
-                    if b["owner_id"] is None and (b["applicant_id"] == user_id or (not verified and b["claimed_owner_id"] == user_id))]
+            rows = [dict(b) for b in self._index.values()
+                    if b["status"] in ("pending", "denied") and b["owner_id"] is None and (b["applicant_id"] == user_id or (not verified and b["claimed_owner_id"] == user_id))]
         return sorted(rows, key=lambda b: b["first_seen"], reverse=True)
 
     def apply(self, user_id, bot_id, now=None):
@@ -549,6 +572,8 @@ class Store:
         now = int(now or time.time())
         with self._lock:
             bot, members = self._read(bot_id)
+            if bot and bot["status"] == "denied":
+                raise ValueError(f"That bot was denied: {bot['deny_reason']} If you have fixed that, ask in the support server.")
             if bot and bot["status"] != "pending":
                 raise ValueError("That bot is already registered. If it is yours, ask in the support server.")
             if bot and bot["applicant_id"] and bot["applicant_id"] != user_id:

@@ -46,6 +46,8 @@ MESSAGES = {
     "invite_saved": ("ok", "Invite link saved. Copy the promo link from the bot\'s Invite link section."),
     "key_removed": ("ok", "API key removed. It stops working right away."),
     "login_needed": ("bad", "Log in to open the panel."),
+    "bot_denied": ("ok", "Bot denied. Its owner can see your reason in the panel, and the bot is told the next time it asks."),
+    "reason_needed": ("bad", "Write a reason for denying it: the bot's owner sees it."),
     "revoked": ("ok", "Access removed. The bot will be told on its next report."),
     "owner": ("ok", "Owner changed."),
     "role_added": ("ok", "Role saved."),
@@ -107,13 +109,13 @@ ol.steps li{margin:.7rem 0;padding-left:.3rem;max-width:68ch}
 .row{display:grid;grid-template-columns:.3rem minmax(0,1fr);background:var(--surface);border:1px solid var(--line);border-radius:.6rem;margin-bottom:.9rem;overflow:hidden}
 .row>.edge{background:var(--line)}
 .row.active>.edge,.row.approved>.edge{background:var(--ok)}.row.pending>.edge,.row.waiting>.edge{background:var(--wait)}
-.row.quiet>.edge{background:var(--wait)}.row.removed>.edge{background:var(--bad)}
+.row.quiet>.edge{background:var(--wait)}.row.removed>.edge,.row.denied>.edge{background:var(--bad)}
 .row .in{padding:1rem 1.15rem}
 .head{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:baseline}
 .status{font-size:.9rem;display:inline-flex;gap:.45rem;align-items:center}
 .dot{width:.6rem;height:.6rem;border-radius:50%;background:var(--muted);display:inline-block}
 .active .dot{background:var(--ok);animation:pulse 2.4s ease-in-out infinite}
-.pending .dot,.waiting .dot,.quiet .dot{background:var(--wait)}.removed .dot{background:var(--bad)}
+.pending .dot,.waiting .dot,.quiet .dot{background:var(--wait)}.removed .dot,.denied .dot{background:var(--bad)}
 @keyframes pulse{50%{opacity:.35}}
 @media(prefers-reduced-motion:reduce){.active .dot{animation:none}}
 .id{font-family:var(--mono);font-size:.82rem;color:var(--muted)}
@@ -478,7 +480,7 @@ def growth(bot):
 
 
 EVENT_TEXT = {
-    "bot.approve": "approved", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
+    "bot.approve": "approved", "bot.deny": "denied", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
     "bot.invite": "set the invite link of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
     "key.rotate": "made a new private key for", "role.add": "gave a role to", "role.remove": "removed the role of", "announce.send": "sent an announcement to",
     "page.view": "opened the", "apikey.create": "made an API key", "apikey.remove": "removed an API key", "api.read": "read data through the API for",
@@ -528,11 +530,14 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
     title = f'<a href="/bots/{esc(bot["bot_id"])}">{esc(name)}</a>' if link and bot["status"] == "approved" else esc(name)
     parts = [f'<div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3>{title}</h3></div><span class="status"><span class="dot"></span>{esc(label)}</span></div>',
              f'<div class="id">{esc(bot["bot_id"])}</div>']
-    if level != "owner" and code != "pending":
+    if level != "owner" and code not in ("pending", "denied"):
         parts.append(f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
     if code == "pending":
         parts.append('<p class="muted">The bot has asked to send telemetry. It is waiting for someone on the team to approve it. '
                      'Nothing is shared until then, and you will see its data and private key here once it is.</p>')
+    elif code == "denied":
+        parts.append(f'<div class="banner"><h3>Denied</h3><p>{esc(bot.get("deny_reason"))}</p>'
+                     '<p class="muted small">If you have fixed that, ask in the support server and mention the bot\'s ID. The team can approve it again.</p></div>')
     elif code == "removed":
         parts.append('<p class="muted">Telemetry access for this bot was removed. Ask in the support server if you think that is a mistake.</p>')
     else:
@@ -549,17 +554,17 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
 def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", members=(), poll=False):
     code, _ = bot_state(bot, now)
     parts = [bot_live(bot, now, level, link=not poll, poll=poll)]
-    if code not in ("pending", "removed"):
+    if code not in ("pending", "removed", "denied"):
         if key_box and bot.get("key") and level in ("owner", "manager"):
             parts.append(f'<div class="key" data-key-for="{esc(bot["bot_id"])}"><span class="muted small">Private key</span>'
                          f'<output aria-live="polite">{"&bull;" * 24}</output><button type="button">Show key</button></div>'
                          f'<form class="inline" method="post" action="/panel/rotate-key"><input type="hidden" name="csrf" value="{esc(csrf)}">'
                          f'<input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
                          f'<button type="submit">Make a new key</button> <span class="muted small">The old key stops working right away.</span></form>')
-    if code != "pending" and bot["status"] == "approved" and level in ("owner", "manager"):
+    if code not in ("pending", "denied") and bot["status"] == "approved" and level in ("owner", "manager"):
         parts.append(invite_section(bot, csrf))
         parts.append(access_section(bot, csrf, level, members))
-    if code not in ("pending", "removed") and _ctx.get().store:
+    if code not in ("pending", "removed", "denied") and _ctx.get().store:
         events = _ctx.get().store.read_audit(("approver", "manager"), bot_id=bot["bot_id"], limit=15)
         parts.append(f'<details><summary>Activity on this bot</summary>{activity_table(events, show_bot=False)}</details>')
     return f'<div class="row {code}"><div class="edge"></div><div class="in">{"".join(parts)}</div></div>'
@@ -646,6 +651,9 @@ def staff_row(bot, role, csrf, now):
         if bot["claimed_owner_id"] and bot["claimed_owner_id"] != bot.get("applicant_id"):
             meta.append(f'<span class="muted small">bot says its owner is <span class="id">{esc(bot["claimed_owner_id"])}</span> (not verified)</span>')
         meta.append(f'<span class="muted small">first seen {when(bot["first_seen"])}</span>')
+    elif bot["status"] == "denied":
+        meta.append(f'<span class="muted small">denied by <span class="id">{esc(bot["denied_by"])}</span> {when(bot["denied_at"])}</span>')
+        meta.append(f'<span class="muted small">reason: {esc(bot["deny_reason"])}</span>')
     else:
         meta.append(f'<span class="muted small">owner <span class="id">{esc(bot["owner_id"] or "not set")}</span></span>')
         meta.append(f'<span class="muted small">last report {when(bot["last_report_at"])}</span>')
@@ -654,7 +662,10 @@ def staff_row(bot, role, csrf, now):
     if bot["status"] == "pending" and can_approve(role):
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
                  f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(bot.get("applicant_id") or bot["claimed_owner_id"])}" autocomplete="off"></label>'
-                 f'<button class="primary" type="submit">Approve</button></form>')
+                 f'<button class="primary" type="submit">Approve</button></form>'
+                 f'<form class="inline" method="post" action="/panel/deny">{hidden}'
+                 f'<label>Reason for denying (the owner sees it)<input name="reason" required minlength="5" maxlength="500" size="48" autocomplete="off"></label>'
+                 f'<button class="danger" type="submit">Deny</button></form>')
     elif bot["status"] == "approved" and can_change_owner(role):
         forms = (f'<form class="inline" method="post" action="/panel/owner">{hidden}'
                  f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(bot["owner_id"])}" autocomplete="off"></label>'
@@ -663,16 +674,18 @@ def staff_row(bot, role, csrf, now):
                  f'<p class="muted small">Switching owner is for people who moved to a new account. It also ends any sharing the old owner set up.</p>')
         if can_revoke(role):
             forms += f'<form class="inline" method="post" action="/panel/revoke">{hidden}<button class="danger" type="submit">Remove access</button></form>'
-    elif bot["status"] == "revoked" and can_approve(role):
+    elif bot["status"] in ("revoked", "denied") and can_approve(role):
+        owner = bot["owner_id"] or bot.get("applicant_id") or bot["claimed_owner_id"]
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
-                 f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(bot["owner_id"])}" autocomplete="off"></label>'
-                 f'<button type="submit">Approve again</button></form>')
+                 f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(owner)}" autocomplete="off"></label>'
+                 f'<button type="submit">Approve{" again" if bot["status"] == "revoked" else " anyway"}</button></form>')
     return (f'<div class="row {code}"><div class="edge"></div><div class="in"><div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3><a href="/panel/{esc(bot["bot_id"])}">{esc(name)}</a></h3></div>'
             f'<span class="status"><span class="dot"></span>{esc(label)}</span></div><div class="head">{"".join(meta)}</div>{forms}</div></div>')
 
 
 def approvals_tab(store, role, csrf, now):
     pending, approved, revoked = store.with_status("pending"), store.with_status("approved"), store.with_status("revoked")
+    denied = store.with_status("denied")
     out = ["<h2>Waiting for approval</h2>"]
     out += [staff_row(b, role, csrf, now) for b in pending] or ['<div class="empty">No bots are waiting. When a bot asks for a token it shows up here.</div>']
     out.append('<section><h2>Approve by ID</h2>')
@@ -687,6 +700,10 @@ def approvals_tab(store, role, csrf, now):
     if promos:
         out.append('<section><h2>Promo links</h2><p class="muted small">Bots with an invite link, ready to paste into the README or the server.</p>'
                    f'<textarea readonly rows="{min(len(promos), 12)}" aria-label="Promo links">{esc(chr(10).join(promos))}</textarea></section>')
+    if denied:
+        out.append(f'<section><h2>Denied ({len(denied)})</h2>')
+        out += [staff_row(b, role, csrf, now) for b in denied]
+        out.append("</section>")
     if revoked:
         out.append(f'<section><h2>Access removed ({len(revoked)})</h2>')
         out += [staff_row(b, role, csrf, now) for b in revoked]

@@ -42,8 +42,11 @@ class Env:
 
     def __init__(self, approved=("bot1",), ttl=3600):
         self.tmp = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.tmp, "telemetry.db")
+        self.db_path = os.path.join(self.tmp, "telemetry.json")
         self.cfg = server.Config("s" * 40, self.db_path, owners=["boss"], token_ttl=ttl, require_key=False)
+        self._reports = []
+        real_record = self.cfg.store.record_report
+        self.cfg.store.record_report = lambda bot_id, report, now=None: (self._reports.append({"report": report}), real_record(bot_id, report, now))[1]
         self.approve(*approved)
         self.tel = server.make_server(self.cfg, "127.0.0.1", 0)
 
@@ -73,7 +76,7 @@ class Env:
             store.approve(i, "owner1", "boss")
 
     def reports(self):
-        return [{"report": json.loads(r["report"])} for r in self.cfg.store._all("SELECT report FROM reports ORDER BY id")]
+        return list(self._reports)
 
     def wait_for_reports(self, n=1, timeout=5):
         end = time.time() + timeout
@@ -87,7 +90,7 @@ class Env:
         for s in (self.api, self.tel):
             s.shutdown()
             s.server_close()
-        self.cfg.store._db.close()
+        self.cfg.store.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 

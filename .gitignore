@@ -224,6 +224,6 @@ approved_bots.json
 telemetry_reports.jsonl
 
 server/.env
-server/telemetry.db*
+server/telemetry.json*
 server/*.secret
-telemetry.db*
+telemetry.json*

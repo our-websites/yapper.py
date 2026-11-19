@@ -242,7 +242,10 @@ class ReportTests(TelemetryCase):
         self.assertEqual(report["event"], "preview")
         self.assertEqual(report["sdk"]["version"], yapper.__version__)
         self.assertIn("python", report["runtime"])
-        self.assertEqual(report["bot"], {"id": "bot1", "username": "Testy", "uptime_seconds": None})
+        self.assertEqual(report["bot"], {"id": "bot1", "username": "Testy", "avatar": None, "uptime_seconds": None})
+        self.assertEqual(report["extra"], {})
+        # the version written in the SDK file itself (main.py) is read from disk; the PyPI one may differ
+        self.assertEqual(report["sdk"]["yapin_version"], yapper.__version__)
         self.assertEqual(report["servers"], {"count": 2, "members_total": 42, "online_total": 11})
         self.assertEqual([c["name"] for c in report["commands"]], ["ban", "joke", "ping"])
         ban = report["commands"][0]
@@ -252,6 +255,56 @@ class ReportTests(TelemetryCase):
         self.assertEqual(report["cogs"], ["Fun"])
         self.assertEqual(report["listeners"], {"member_join": 1})
         self.assertGreaterEqual(report["buttons"], 1)
+
+    def test_extra_data_is_added_removed_and_limited(self):
+        bot = self.bot_with_stuff()
+        self.assertTrue(self.t.add_data(bot, "games", 12))
+        self.assertTrue(self.t.add_data(bot, "cache", lambda: 3))
+        self.assertTrue(self.t.add_data(bot, "nested", {"a": [1, 2]}))
+        self.assertEqual(self.t.preview(bot)["extra"], {"games": 12, "cache": 3, "nested": {"a": [1, 2]}})
+        self.assertFalse(self.t.add_data(bot, "x" * 65, 1))
+        self.assertFalse(self.t.add_data(bot, "", 1))
+        self.assertFalse(self.t.add_data(bot, "big", "x" * 20000))
+        self.assertFalse(self.t.add_data(bot, "bad", object()))
+        self.assertTrue(self.t.remove_data(bot, "games"))
+        self.assertFalse(self.t.remove_data(bot, "games"))
+        self.assertNotIn("games", self.t.preview(bot)["extra"])
+
+    def test_extra_data_has_a_key_limit_and_a_broken_value_never_breaks_the_report(self):
+        bot = self.bot_with_stuff()
+        for i in range(self.t.MAX_EXTRA_KEYS):
+            self.assertTrue(self.t.add_data(bot, f"k{i}", i))
+        self.assertFalse(self.t.add_data(bot, "one-too-many", 1))
+        self.assertTrue(self.t.add_data(bot, "k0", 99))        # changing an existing one is fine
+        self.t.remove_data(bot, "k1")
+        self.t.add_data(bot, "boom", lambda: 1 / 0)
+        report = self.t.preview(bot)
+        self.assertNotIn("boom", report["extra"])
+        self.assertEqual(report["extra"]["k0"], 99)
+
+    def test_enable_accepts_extra_and_sends_it(self):
+        bot = self.bot_with_stuff("bot1")
+        self.t.enable(bot, endpoint=self.env.endpoint, extra={"mood": "great"})
+        self.assertEqual(self.t.preview(bot)["extra"], {"mood": "great"})
+        self.t.disable(bot)
+
+    def test_avatar_is_only_a_public_https_link(self):
+        for me, expected in (({"avatar_url": "https://cdn.example/a.png"}, "https://cdn.example/a.png"), ({"avatar": "https://cdn.example/b.png"}, "https://cdn.example/b.png"),
+                             ({"avatar": "http://cdn.example/b.png"}, None), ({"avatar": "javascript:alert(1)"}, None), ({"avatar": "https://x/" + "a" * 400}, None), ({}, None)):
+            self.assertEqual(self.t._avatar(me), expected)
+
+    def test_sdk_version_is_read_from_the_sdk_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "sdk.py")
+            open(fake, "w").write('"""doc"""\n__version__ = "9.8.7"\n')
+            mod = type(sys)("fake_sdk_for_test")
+            mod.__file__ = fake
+            sys.modules[mod.__name__] = mod
+            self.addCleanup(sys.modules.pop, mod.__name__, None)
+
+            class FakeBot:
+                __module__ = mod.__name__
+            self.assertEqual(self.t._sdk_file_version(FakeBot()), "9.8.7")
 
     def test_report_never_contains_secrets_or_identifying_names(self):
         text = json.dumps(self.t.preview(self.bot_with_stuff()))

@@ -6,7 +6,8 @@ load it yourself, so a normal install sends nothing, ever.
 
 Once on, it sends a small JSON report (see `collect()`) when the bot comes online and then every 30 minutes: bot id and
 name, command names/descriptions/options, cog and extension names, how many listeners and buttons it has, how many
-servers it is in and their total member count, the yapper version, the Python version and the OS name. It never sends
+servers it is in and their total member count, the bot's profile picture link, the yapper version, the Python version and
+the OS name, plus any extra values you add yourself with `add_data(bot, name, value)`. It never sends
 the bot token, message content, user, server or channel names or ids, or anything else.
 
 Reports are only accepted from bots on an approved list. The first time, the bot asks the telemetry server for a token
@@ -21,10 +22,12 @@ See exactly what would be sent with `telemetry.preview(bot)`. Turn it off by rem
 This file is self-contained (standard library only), so it also works next to the single-file yapper.py download:
 `import telemetry; telemetry.enable(bot)`.
 """
+import importlib.util
 import json
 import os
 import platform
 import random
+import re
 import sys
 import threading
 import time
@@ -46,7 +49,7 @@ _NOT_APPROVED = ("Your bot ({bot_id}) is not on the telemetry approved list yet,
                  "server (the invite is in the yapper.py README) and ask someone to add your bot. Bring your bot's ID "
                  "and proof that yapper.py is your main SDK.")
 
-__all__ = ["enable", "disable", "preview", "collect", "setup", "teardown", "ENDPOINT"]
+__all__ = ["enable", "disable", "preview", "collect", "add_data", "remove_data", "setup", "teardown", "ENDPOINT"]
 
 
 def _disabled_by_env():
@@ -95,8 +98,79 @@ def _servers(bot):
     return {"count": len(servers), "members_total": members, "online_total": sum(int(o) for o in online) if online else None}
 
 
+_VERSION_LINE = re.compile(r"""^__version__\s*(?::[^=]+)?=\s*["']([^"']{1,32})["']""", re.M)
+
+
+def _sdk_file_version(bot):
+    """The __version__ written in the SDK file itself (main.py in the installed package, or the single-file download),
+    read from disk without importing anything. This is the Yapin' SDK version; the PyPI version below may differ."""
+    try:
+        module = sys.modules.get(type(bot).__module__)
+        path = getattr(module, "__file__", None)
+        if not path:
+            spec = importlib.util.find_spec("yapper.main")
+            path = spec.origin if spec else None
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as f:
+                found = _VERSION_LINE.search(f.read(200_000))
+            return found.group(1) if found else None
+    except Exception:
+        pass
+    return None
+
+
 def _sdk_info(bot):
-    return {"version": _sdk_version(bot), "package_version": _dist_version("yapper.py"), "yapin_version": _dist_version("yapin")}
+    return {"version": _sdk_version(bot), "package_version": _dist_version("yapper.py"), "yapin_version": _sdk_file_version(bot)}
+
+
+MAX_EXTRA_KEYS = 50
+MAX_EXTRA_BYTES = 10_000   # per value, as JSON
+
+
+def add_data(bot, name, value):
+    """Add your own extra telemetry value to every report, shown to you in the panel next to the rest of your data.
+    `value` is anything JSON can hold (numbers, text, lists, dicts), or a function with no arguments that returns one,
+    called each time a report is built (e.g. `lambda: len(my_cache)`). Returns True when it was added; False when it does
+    not fit (name over 64 characters, over 50 values, or a value over 10 KB). It is part of `preview(bot)`, so you always
+    see exactly what goes out. Only add what you are happy to share: it is sent as it is."""
+    extra = bot.__dict__.setdefault("_yapper_telemetry_extra", {})
+    name = str(name)
+    if not name or len(name) > 64 or (name not in extra and len(extra) >= MAX_EXTRA_KEYS):
+        return False
+    if not callable(value):
+        try:
+            if len(json.dumps(value)) > MAX_EXTRA_BYTES:
+                return False
+        except (TypeError, ValueError):
+            return False
+    extra[name] = value
+    return True
+
+
+def remove_data(bot, name):
+    """Stop sending an extra value added with add_data(). Returns False when there was none by that name."""
+    return (getattr(bot, "_yapper_telemetry_extra", None) or {}).pop(str(name), None) is not None
+
+
+def _extra(bot):
+    out = {}
+    for name, value in list((getattr(bot, "_yapper_telemetry_extra", None) or {}).items()):
+        try:
+            value = value() if callable(value) else value
+            if len(json.dumps(value)) <= MAX_EXTRA_BYTES:
+                out[name] = value
+        except Exception:
+            continue   # a broken value never breaks the report
+    return out
+
+
+def _avatar(me):
+    """The bot's profile picture link, when the API gives one (public https links only)."""
+    for key in ("avatar_url", "avatar"):
+        url = me.get(key)
+        if isinstance(url, str) and url.startswith("https://") and len(url) <= 300:
+            return url
+    return None
 
 
 def collect(bot, event="report", started=None):
@@ -115,7 +189,7 @@ def collect(bot, event="report", started=None):
         "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sdk": _sdk_info(bot),
         "runtime": {"python": platform.python_version(), "os": platform.system()},
-        "bot": {"id": me.get("id"), "username": me.get("username"),
+        "bot": {"id": me.get("id"), "username": me.get("username"), "avatar": _avatar(me),
                 "uptime_seconds": int(time.time() - started) if started else None},
         "servers": _servers(bot),
         "commands": commands,
@@ -123,6 +197,7 @@ def collect(bot, event="report", started=None):
         "extensions": sorted(n for n in (getattr(bot, "extensions", None) or {}) if n != __name__),
         "listeners": {ev: n for ev, n in sorted(listeners.items()) if n},
         "buttons": len(getattr(bot, "_buttons", None) or []),
+        "extra": _extra(bot),
     }
 
 
@@ -241,12 +316,13 @@ class _Reporter:
             return False
 
 
-def enable(bot, endpoint=None, interval=DEFAULT_INTERVAL, owner_id=None):
+def enable(bot, endpoint=None, interval=DEFAULT_INTERVAL, owner_id=None, extra=None):
     """Turn telemetry on for this bot. Returns True when it is on, False when YAPPER_TELEMETRY=0 / DO_NOT_TRACK=1 is set.
     Reports start once the bot is online. `interval` (seconds, at least 300) is the time between reports, 30 minutes by
     default. Once your bot is approved you get a private key in the panel: set it as TELEMETRY_KEY in your environment or
     .env file. `owner_id` (or TELEMETRY_OWNER_ID) is your Yapin' user ID, so you can see your bot's status in the panel
-    before it is approved. Raises ValueError when there is no (https) endpoint."""
+    before it is approved. `extra` is a dict of your own values to send along (see add_data). Raises ValueError when there is no
+    (https) endpoint."""
     if getattr(bot, "_yapper_telemetry", None) is not None:
         return True
     if _disabled_by_env():
@@ -255,6 +331,8 @@ def enable(bot, endpoint=None, interval=DEFAULT_INTERVAL, owner_id=None):
         return False
     url = _check_endpoint(endpoint or ENDPOINT)
     reporter = _Reporter(bot, url, max(MIN_INTERVAL, int(interval)), owner_id)
+    for name, value in (extra or {}).items():
+        add_data(bot, name, value)
     bot._yapper_telemetry = reporter
     bot.on("ready", reporter._on_ready)
     if getattr(bot, "log", True):

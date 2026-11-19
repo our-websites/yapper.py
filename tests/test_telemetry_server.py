@@ -619,7 +619,7 @@ class PanelActionTests(Case):
 
     def test_approvers_can_only_approve(self):
         self.approve("b1", "o")
-        for path, form in (("/panel/revoke", {"bot_id": "b1"}), ("/panel/owner", {"bot_id": "b1", "owner_id": "z"}),
+        for path, form in (("/panel/revoke", {"bot_id": "b1"}),
                            ("/panel/role", {"user_id": "n1", "role": "approver"}), ("/panel/remove-role", {"user_id": "man"})):
             self.assertIn("msg=denied", self.location(self.act("app", path, **form)), path)
         self.assertEqual(self.store.get_bot("b1")["status"], "approved")
@@ -810,6 +810,159 @@ class MultipleBotsPanelTests(Case):
         self.call("POST", "/", {"bot_id": "fake", "username": "Fake", "owner_id": "own1"})
         self.assertNotIn("Fake", self.view("own1"))
         self.assertNotIn("Fake</h3>", self.view("imposter"))
+
+
+class SharingTests(unittest.TestCase):
+    def setUp(self):
+        self.s = Store(":memory:", owners=["boss"])
+        self.s.approve("b1", "own", "boss")
+
+    def test_owner_shares_as_viewer_or_manager(self):
+        self.s.share("own", "b1", "v1", "viewer")
+        self.s.share("own", "b1", "m1", "manager")
+        self.assertEqual([self.s.access_level("b1", u) for u in ("own", "m1", "v1", "nobody")], ["owner", "manager", "viewer", None])
+        self.assertEqual([b["bot_id"] for b in self.s.shared_with("v1")], ["b1"])
+        self.assertEqual(self.s.shared_with("v1")[0]["level"], "viewer")
+
+    def test_managers_add_viewers_only_and_viewers_nothing(self):
+        self.s.share("own", "b1", "m1", "manager")
+        self.s.share("own", "b1", "v1", "viewer")
+        self.s.share("m1", "b1", "v2", "viewer")
+        with self.assertRaises(PermissionError):
+            self.s.share("m1", "b1", "m2", "manager")
+        with self.assertRaises(PermissionError):
+            self.s.share("v1", "b1", "v3", "viewer")
+        with self.assertRaises(PermissionError):
+            self.s.share("boss", "b1", "v3", "viewer")      # staff are not owners of the bot
+        with self.assertRaises(PermissionError):
+            self.s.share("own", "b1", "v3", "owner")
+        self.s.share("own", "b1", "m3", "manager")
+        with self.assertRaises(PermissionError):
+            self.s.share("m1", "b1", "m3", "viewer")       # a manager can't demote another manager
+
+    def test_removing_access(self):
+        self.s.share("own", "b1", "m1", "manager")
+        self.s.share("own", "b1", "v1", "viewer")
+        with self.assertRaises(PermissionError):
+            self.s.unshare("v1", "b1", "m1")
+        with self.assertRaises(PermissionError):
+            self.s.unshare("m1", "b1", "own")
+        self.s.unshare("m1", "b1", "v1")
+        self.s.unshare("m1", "b1", "m1")                    # leaving
+        self.assertEqual(self.s.members("b1"), [])
+        with self.assertRaises(ValueError):
+            self.s.unshare("own", "b1", "ghost")
+
+    def test_bad_requests_and_limits(self):
+        for user in ("own", "bad id!"):
+            with self.assertRaises(ValueError):
+                self.s.share("own", "b1", user, "viewer")
+        for i in range(store_mod.MAX_MEMBERS):
+            self.s.share("own", "b1", f"u{i}", "viewer")
+        with self.assertRaises(ValueError):
+            self.s.share("own", "b1", "one-more", "viewer")
+        self.s.share("own", "b1", "u0", "manager")           # changing an existing person is fine at the limit
+
+    def test_pending_and_removed_bots_cannot_be_shared(self):
+        self.s.see_bot("p", None, None, None, None)
+        with self.assertRaises(PermissionError):
+            self.s.share("own", "p", "v1", "viewer")
+        self.s.share("own", "b1", "v1", "viewer")
+        self.s.revoke("b1")
+        self.assertIsNone(self.s.access_level("b1", "v1"))
+        self.assertEqual(self.s.shared_with("v1"), [])
+
+    def test_switching_owner_ends_old_sharing_and_can_replace_the_key(self):
+        self.s.share("own", "b1", "v1", "viewer")
+        key = self.s.get_bot("b1")["key"]
+        self.s.set_owner("b1", "newown")
+        self.assertEqual((self.s.access_level("b1", "own"), self.s.access_level("b1", "v1"), self.s.access_level("b1", "newown")), (None, None, "owner"))
+        self.assertEqual(self.s.get_bot("b1")["key"], key)
+        self.s.set_owner("b1", "newown2", new_key_too=True)
+        self.assertNotEqual(self.s.get_bot("b1")["key"], key)
+
+    def test_managers_can_make_new_keys(self):
+        self.s.share("own", "b1", "m1", "manager")
+        self.s.share("own", "b1", "v1", "viewer")
+        self.s.rotate_key("b1", "m1")
+        with self.assertRaises(PermissionError):
+            self.s.rotate_key("b1", "v1")
+
+
+class SharingPanelTests(Case):
+    def setUp(self):
+        super().setUp()
+        self.store.set_role("boss", "app", "approver")
+        self.approve("b1", "own", "Shared Bot")
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Shared Bot"}, "servers": {"count": 3},
+                                        "commands": [{"name": "ping", "description": "SECRET-COMMAND-TEXT", "options": []}]})
+        self.key = self.store.get_bot("b1")["key"]
+
+    def key_status(self, user):
+        cookie, token = self.csrf(user)
+        return self.call("POST", "/panel/key", {"bot_id": "b1"}, {"Cookie": f"{auth.SESSION_COOKIE}={cookie}", "X-CSRF-Token": token})[0]
+
+    def loc(self, r):
+        return r[3].getheader("Location")
+
+    def test_owner_shares_through_the_panel(self):
+        self.assertIn("msg=shared", self.loc(self.act("own", "/panel/share", bot_id="b1", user_id="v1", level="viewer")))
+        self.assertIn("msg=shared", self.loc(self.act("own", "/panel/share", bot_id="b1", user_id="m1", level="manager")))
+        self.assertIn("Who can see this bot (2)", self.view("own"))
+
+    def test_viewers_see_data_but_not_the_key(self):
+        self.store.share("own", "b1", "v1", "viewer")
+        page = self.view("v1")
+        for needle in ("Shared Bot", "SECRET-COMMAND-TEXT", "Shared with you as a viewer", "Next expected"):
+            self.assertIn(needle, page)
+        self.assertNotIn('data-key-for="', page)
+        self.assertNotIn("Who can see this bot", page)
+        self.assertEqual(self.key_status("v1"), 404)
+        self.assertIn("msg=denied", self.loc(self.act("v1", "/panel/rotate-key", bot_id="b1")))
+        self.assertIn("msg=denied", self.loc(self.act("v1", "/panel/share", bot_id="b1", user_id="x1", level="viewer")))
+
+    def test_managers_get_the_key_and_can_add_viewers_only(self):
+        self.store.share("own", "b1", "m1", "manager")
+        page = self.view("m1")
+        self.assertIn('data-key-for="', page)
+        self.assertIn("Shared with you as a manager", page)
+        self.assertEqual(self.key_status("m1"), 200)
+        self.assertIn("msg=shared", self.loc(self.act("m1", "/panel/share", bot_id="b1", user_id="v9", level="viewer")))
+        self.assertIn("msg=denied", self.loc(self.act("m1", "/panel/share", bot_id="b1", user_id="m9", level="manager")))
+        self.assertIn("msg=rotated", self.loc(self.act("m1", "/panel/rotate-key", bot_id="b1")))
+        self.assertNotIn('<option value="manager">', page)
+
+    def test_staff_and_strangers_cannot_share_or_see_a_bot_through_sharing(self):
+        for user in ("boss", "app", "stranger"):
+            self.assertIn("msg=denied", self.loc(self.act(user, "/panel/share", bot_id="b1", user_id="x1", level="viewer")), user)
+            self.assertEqual(self.key_status(user), 404)
+        self.assertEqual(self.store.members("b1"), [])
+
+    def test_removing_someone_takes_effect_at_once(self):
+        self.store.share("own", "b1", "v1", "viewer")
+        self.assertIn("SECRET-COMMAND-TEXT", self.view("v1"))
+        self.assertIn("msg=unshared", self.loc(self.act("own", "/panel/unshare", bot_id="b1", user_id="v1")))
+        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("v1"))
+        self.assertIn("don't have any bots", self.view("v1"))
+
+    def test_staff_who_are_given_a_bot_get_the_my_bots_tab(self):
+        self.store.share("own", "b1", "app", "viewer")
+        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', self.view("app")), ["approvals", "bots"])
+
+    def test_approvers_can_switch_the_owner_to_a_new_account(self):
+        page = self.view("app", "/?tab=approvals")
+        self.assertIn("Switch owner", page)
+        self.assertNotIn("Remove access", page)               # approvers still can't remove access
+        self.store.share("own", "b1", "v1", "viewer")
+        self.assertIn("msg=owner", self.loc(self.act("app", "/panel/owner", bot_id="b1", owner_id="own-new", new_key="1")))
+        bot = self.store.get_bot("b1")
+        self.assertEqual(bot["owner_id"], "own-new")
+        self.assertNotEqual(bot["key"], self.key)
+        self.assertIn("SECRET-COMMAND-TEXT", self.view("own-new"))
+        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("own"))      # the old account is out
+        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("v1"))
+        self.assertIn("msg=denied", self.loc(self.act("stranger", "/panel/owner", bot_id="b1", owner_id="x")))
+        self.assertIn("msg=denied", self.loc(self.act("own", "/panel/owner", bot_id="b1", owner_id="x")))   # the bot's owner can't hand it over alone
 
 
 class ConsoleTests(unittest.TestCase):

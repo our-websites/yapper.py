@@ -34,6 +34,15 @@ def can_revoke(role):
     return role in ("owner", "manager")
 
 
+def can_change_owner(role):
+    """Approvers can switch a bot to a new owner account (someone lost or replaced their account)."""
+    return role in ("owner", "manager", "approver")
+
+
+SHARE_LEVELS = ("viewer", "manager")    # what a bot's owner can give others: view the data, or also manage the bot's key and sharing
+MAX_MEMBERS = 20
+
+
 def assignable_roles(role):
     """Roles someone with this role can give out: owners give approver and manager, managers only approver."""
     return {"owner": ("manager", "approver"), "manager": ("approver",)}.get(role, ())
@@ -80,6 +89,8 @@ class Store:
                     last_report_at INTEGER, last_report TEXT);
                 CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, received_at INTEGER NOT NULL, report TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS reports_by_bot ON reports(bot_id, id);
+                CREATE TABLE IF NOT EXISTS members(bot_id TEXT NOT NULL, user_id TEXT NOT NULL, level TEXT NOT NULL, added_by TEXT, added_at INTEGER,
+                                                   PRIMARY KEY(bot_id, user_id));
             """)
             if "applicant_id" not in {r["name"] for r in self._db.execute("PRAGMA table_info(bots)")}:
                 self._db.execute("ALTER TABLE bots ADD COLUMN applicant_id TEXT")   # databases made before applications existed
@@ -200,12 +211,74 @@ class Store:
         if self._run("UPDATE bots SET status='revoked' WHERE bot_id=? AND status='approved'", (str(bot_id),)).rowcount == 0:
             raise ValueError("That bot is not approved.")
 
-    def set_owner(self, bot_id, owner_id):
+    def set_owner(self, bot_id, owner_id, new_key_too=False):
+        """Switch a bot to another account (e.g. its owner got a new one). Anyone the old owner shared it with loses access,
+        so the new owner starts clean; `new_key_too` also replaces the private key."""
         owner_id = str(owner_id).strip()
         if not valid_id(owner_id):
             raise ValueError("Enter the owner's user ID.")
-        if self._run("UPDATE bots SET owner_id=? WHERE bot_id=? AND status!='pending'", (owner_id, str(bot_id))).rowcount == 0:
+        bot_id = str(bot_id)
+        if self._run("UPDATE bots SET owner_id=? WHERE bot_id=? AND status!='pending'", (owner_id, bot_id)).rowcount == 0:
             raise ValueError("That bot is not approved.")
+        self._run("DELETE FROM members WHERE bot_id=?", (bot_id,))
+        if new_key_too:
+            self._run("UPDATE bots SET key=? WHERE bot_id=?", (new_key(), bot_id))
+
+    # ---- sharing a bot with other people ----
+
+    def access_level(self, bot_id, user_id):
+        """owner, manager or viewer for this person and bot; None when they have no access. Only approved bots can be reached."""
+        bot = self.get_bot(bot_id)
+        if not bot or bot["status"] != "approved":
+            return None
+        user_id = str(user_id)
+        if bot["owner_id"] == user_id:
+            return "owner"
+        row = self._one("SELECT level FROM members WHERE bot_id=? AND user_id=?", (bot["bot_id"], user_id))
+        return row["level"] if row else None
+
+    def members(self, bot_id):
+        return self._all("SELECT * FROM members WHERE bot_id=? ORDER BY level DESC, user_id", (str(bot_id),))
+
+    def share(self, actor, bot_id, user_id, level):
+        """Give someone access to a bot. Owners can give viewer or manager, managers can give viewer."""
+        user_id = str(user_id).strip()
+        if not valid_id(user_id):
+            raise ValueError("That does not look like a user ID.")
+        mine = self.access_level(bot_id, actor)
+        if level not in SHARE_LEVELS or mine not in ("owner", "manager") or (mine == "manager" and level != "viewer"):
+            raise PermissionError("You can't give that access.")
+        bot = self.get_bot(bot_id)
+        if user_id == bot["owner_id"]:
+            raise ValueError("That person already owns this bot.")
+        if user_id == str(actor):
+            raise ValueError("You already have access.")
+        current = self.access_level(bot_id, user_id)
+        if mine == "manager" and current == "manager":
+            raise PermissionError("Only the owner can change a manager.")
+        if current is None and len(self.members(bot_id)) >= MAX_MEMBERS:
+            raise ValueError(f"A bot can be shared with up to {MAX_MEMBERS} people.")
+        self._run("INSERT INTO members(bot_id, user_id, level, added_by, added_at) VALUES(?,?,?,?,?) "
+                  "ON CONFLICT(bot_id, user_id) DO UPDATE SET level=excluded.level, added_by=excluded.added_by, added_at=excluded.added_at",
+                  (bot["bot_id"], user_id, level, str(actor), int(time.time())))
+
+    def unshare(self, actor, bot_id, user_id):
+        user_id = str(user_id).strip()
+        mine = self.access_level(bot_id, actor)
+        theirs = self.access_level(bot_id, user_id)
+        if theirs == "owner":
+            raise PermissionError("The owner can't be removed.")
+        if theirs not in ("viewer", "manager"):
+            raise ValueError("That person doesn't have access.")
+        # owners remove anyone; managers remove viewers; anyone can leave
+        if user_id != str(actor) and not (mine == "owner" or (mine == "manager" and theirs == "viewer")):
+            raise PermissionError("You can't remove that person.")
+        self._run("DELETE FROM members WHERE bot_id=? AND user_id=?", (str(bot_id), user_id))
+
+    def shared_with(self, user_id):
+        """Approved bots other people shared with this person, with their level."""
+        return self._all("SELECT b.*, m.level AS level FROM members m JOIN bots b ON b.bot_id=m.bot_id "
+                         "WHERE m.user_id=? AND b.status='approved' ORDER BY COALESCE(b.name, b.bot_id) COLLATE NOCASE", (str(user_id),))
 
     def check_key(self, bot_id, key):
         bot = self.get_bot(bot_id)
@@ -275,11 +348,10 @@ class Store:
             self._run("UPDATE bots SET applicant_id=? WHERE bot_id=?", (user_id, bot_id))
 
     def rotate_key(self, bot_id, user_id):
-        """A new private key for a bot, only by its owner. The old key stops working at once."""
-        bot = self.get_bot(bot_id)
-        if not bot or bot["status"] != "approved" or bot["owner_id"] != str(user_id):
+        """A new private key for a bot, only by its owner or a manager they added. The old key stops working at once."""
+        if self.access_level(bot_id, user_id) not in ("owner", "manager"):
             raise PermissionError("That is not your bot.")
-        self._run("UPDATE bots SET key=? WHERE bot_id=?", (new_key(), bot["bot_id"]))
+        self._run("UPDATE bots SET key=? WHERE bot_id=?", (new_key(), str(bot_id)))
 
     def with_status(self, status):
         order = "first_seen DESC" if status == "pending" else "COALESCE(name, bot_id) COLLATE NOCASE"

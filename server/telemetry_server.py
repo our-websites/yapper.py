@@ -38,7 +38,7 @@ except ImportError:   # python-dotenv is in requirements.txt; real environment v
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import telemetry_auth as auth  # noqa: E402
 import telemetry_panel as panel  # noqa: E402
-from telemetry_store import CONSOLE, Store, assignable_roles, can_approve, can_revoke, valid_id  # noqa: E402
+from telemetry_store import CONSOLE, Store, can_approve, can_change_owner, can_revoke, valid_id  # noqa: E402
 
 DEFAULT_SUPPORT_URL = "https://www.yapin.gg/invite/pythonlibrary"
 MAX_BODY = 64 * 1024
@@ -361,10 +361,18 @@ class Handler(BaseHTTPRequestHandler):
                 store.revoke(form.get("bot_id", ""))
                 ok = "revoked"
             elif path == "/panel/owner":
-                if not can_revoke(role):
+                if not can_change_owner(role):
                     raise PermissionError
-                store.set_owner(form.get("bot_id", ""), form.get("owner_id", ""))
+                store.set_owner(form.get("bot_id", ""), form.get("owner_id", ""), form.get("new_key") == "1")
                 ok = "owner"
+            elif path in ("/panel/share", "/panel/unshare"):
+                tab = "bots"
+                if path == "/panel/share":
+                    store.share(me, form.get("bot_id", ""), form.get("user_id", ""), form.get("level", ""))
+                    ok = "shared"
+                else:
+                    store.unshare(me, form.get("bot_id", ""), form.get("user_id", ""))
+                    ok = "unshared"
             elif path == "/panel/role":
                 tab = "team"
                 store.set_role(me, form.get("user_id", ""), form.get("role", ""))
@@ -382,14 +390,14 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect(f"/?tab={tab}&msg={ok}")
 
     def reveal_key(self, session):
-        """A bot's private key, only ever to the person set as its owner, only when they ask, never cached."""
+        """A bot's private key, only to its owner (or a manager they added), only when they ask, never cached."""
         data = self.json_body()
         if data is None:
             return
         if not session or not auth.csrf_ok(session, self.headers.get("X-CSRF-Token")):
             return self.reply(403, {"error": "forbidden"})
         bot = self.store.get_bot(str(data.get("bot_id", "")))
-        if not bot or bot["status"] != "approved" or not bot["key"] or bot["owner_id"] != session.user_id:
+        if not bot or not bot["key"] or self.store.access_level(bot["bot_id"], session.user_id) not in ("owner", "manager"):
             return self.reply(404, {"error": "not_found"})
         self.reply(200, {"key": bot["key"]})
 

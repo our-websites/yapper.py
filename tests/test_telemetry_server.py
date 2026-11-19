@@ -77,7 +77,7 @@ class Case(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.mock = MockYapin()
         self.addCleanup(self.mock.close)
-        self.cfg = S.Config(SECRET, os.path.join(self.tmp.name, "t.json"), owners=["boss"], support_url="https://example.test/support",
+        self.cfg = S.Config(SECRET, os.path.join(self.tmp.name, "t.json"), owners=["boss"], user_id_pattern=r"^[\w-]+$", support_url="https://example.test/support",
                             panel_url="", require_key=self.require_key, dev_login=self.dev_login)
         self.store = self.cfg.store
         self.addCleanup(self.store.close)
@@ -115,7 +115,7 @@ class Case(unittest.TestCase):
         body = urllib.parse.urlencode(dict(form, csrf=token))
         return self.call("POST", path, raw=body, headers={"Cookie": f"{auth.SESSION_COOKIE}={cookie}", "Content-Type": "application/x-www-form-urlencoded"})
 
-    def view(self, user, path="/"):
+    def view(self, user, path="/panel"):
         return self.call("GET", path, user=user)[2]
 
     def approve(self, bot_id="b1", owner="own1", name=None):
@@ -378,8 +378,9 @@ class LandingTests(Case):
         self.assertNotIn("prefers-color-scheme: light", text)
 
     def test_other_paths_and_html_only_on_get_root(self):
-        self.assertEqual(self.call("GET", "/panel")[0], 404)
-        self.assertEqual(self.call("GET", "/panel/key")[0], 404)
+        r = self.call("GET", "/panel")
+        self.assertEqual((r[0], r[3].getheader("Location")), (303, "/?msg=login_needed"))   # the panel is its own page: log in first
+        self.assertEqual(self.call("GET", "/panel/key")[0], 303)   # not logged in: sent to the landing page
         self.assertIsNone(self.call("POST", "/", {"bot_id": "b1"})[2] and None)
         self.assertTrue(self.call("POST", "/", {"bot_id": "b1"})[3].getheader("Content-Type").startswith("application/json"))
 
@@ -408,7 +409,7 @@ class LoginTests(Case):
     def test_full_login_with_yapin(self):
         state, state_cookie = self.start()
         status, _, _, resp = self.call("GET", "/auth/callback?" + urllib.parse.urlencode({"code": "goodcode", "state": state}), headers={"Cookie": state_cookie})
-        self.assertEqual((status, resp.getheader("Location")), (303, "/"))
+        self.assertEqual((status, resp.getheader("Location")), (303, "/panel"))
         cookies = resp.msg.get_all("Set-Cookie")
         session = next(c for c in cookies if c.startswith(auth.SESSION_COOKIE + "="))
         self.assertIn("HttpOnly", session)
@@ -509,7 +510,7 @@ class PanelViewTests(Case):
         status, body, _, resp = self.call("POST", "/panel/key", {"bot_id": "b1"}, hdr)
         self.assertEqual((status, body), (200, {"key": key}))
         self.assertEqual(resp.getheader("Cache-Control"), "no-store")
-        self.assertIn("Hide key", self.call("GET", "/")[2] + panel.JS)   # the same button hides it again
+        self.assertIn("Hide key", self.call("GET", "/panel")[2] + panel.JS)   # the same button hides it again
 
     def test_only_the_bots_owner_can_fetch_the_key(self):
         for user in ("boss", "man", "app", "claimer", "stranger"):
@@ -538,7 +539,7 @@ class PanelViewTests(Case):
     def test_staff_see_bots_but_never_the_data_or_keys(self):
         key = self.store.get_bot("b1")["key"]
         for user in ("boss", "man", "app"):
-            text = self.view(user, "/?tab=approvals")
+            text = self.view(user, "/panel/approvals")
             self.assertIn("Cool Bot", text, user)
             self.assertIn("Pending Bot", text, user)
             self.assertNotIn("SECRET-COMMAND-TEXT", text, user)
@@ -546,28 +547,28 @@ class PanelViewTests(Case):
             self.assertNotIn('data-key-for="', text, user)
 
     def test_tabs_by_role(self):
-        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', self.view("boss")), ["approvals", "team"])
-        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', self.view("man")), ["approvals", "team"])
-        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', self.view("app")), ["approvals"])
-        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', self.view("own1")), ["bots"])
+        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("boss")), ["approvals", "people", "activity", "team", "stats", "announce"])
+        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("man")), ["approvals", "people", "activity", "team", "stats", "announce"])
+        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("app")), ["approvals", "people", "activity"])
+        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("own1")), ["bots"])
 
     def test_staff_who_own_bots_get_an_extra_tab(self):
         self.store.approve("b9", "app", "boss", "Approver's Bot")
         text = self.view("app")
-        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', text), ["approvals", "bots"])
-        self.assertIn("Approver&#x27;s Bot", self.view("app", "/?tab=bots"))
-        self.assertIn("Waiting for approval", self.view("app", "/?tab=approvals"))   # can still approve others
+        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', text), ["approvals", "bots", "people", "activity"])
+        self.assertIn("Approver&#x27;s Bot", self.view("app", "/panel/bots"))
+        self.assertIn("Waiting for approval", self.view("app", "/panel/approvals"))   # can still approve others
 
     def test_unknown_or_forbidden_tab_falls_back(self):
-        self.assertIn("Waiting for approval", self.view("app", "/?tab=team"))
-        self.assertIn("Cool Bot", self.view("own1", "/?tab=approvals"))
+        self.assertIn("Waiting for approval", self.view("app", "/panel/team"))
+        self.assertIn("Cool Bot", self.view("own1", "/panel/approvals"))
 
     def test_team_tab_options_depend_on_role(self):
-        owner = self.view("boss", "/?tab=team")
+        owner = self.view("boss", "/panel/team")
         self.assertIn('<option value="manager">', owner)
         self.assertIn('<option value="approver">', owner)
         self.assertIn("Remove role", owner)
-        manager = self.view("man", "/?tab=team")
+        manager = self.view("man", "/panel/team")
         self.assertNotIn('<option value="manager">', manager)
         self.assertIn('<option value="approver">', manager)
         self.assertNotIn("Remove role", manager)
@@ -577,15 +578,15 @@ class PanelViewTests(Case):
         self.store.see_bot("evil", evil, "<b>x</b>", None, None)
         self.store.approve("b2", "own1", "boss")
         self.store.record_report("b2", {"bot": {"id": "b2", "username": evil}, "commands": [{"name": evil, "description": evil, "options": []}]})
-        for user, path in (("boss", "/?tab=approvals"), ("own1", "/"), ("claimer", "/")):
+        for user, path in (("boss", "/panel/approvals"), ("own1", "/panel"), ("claimer", "/panel")):
             text = self.view(user, path)
             self.assertNotIn("<script>alert", text)
             self.assertNotIn("<img src=x", text)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", self.view("own1"))
 
     def test_messages_only_from_a_fixed_list(self):
-        self.assertIn("Bot approved", self.view("boss", "/?tab=approvals&msg=approved"))
-        text = self.view("boss", "/?msg=<script>alert(1)</script>")
+        self.assertIn("Bot approved", self.view("boss", "/panel/approvals?msg=approved"))
+        text = self.view("boss", "/panel?msg=<script>alert(1)</script>")
         self.assertNotIn("alert(1)", text)
 
 
@@ -601,7 +602,7 @@ class PanelActionTests(Case):
 
     def test_approving_sets_the_owner_and_creates_a_key(self):
         r = self.act("app", "/panel/approve", bot_id="p1", owner_id="claimer")
-        self.assertEqual(self.location(r), "/?tab=approvals&msg=approved")
+        self.assertEqual(self.location(r), "/panel/approvals?msg=approved")
         bot = self.store.get_bot("p1")
         self.assertEqual((bot["status"], bot["owner_id"], bot["approved_by"]), ("approved", "claimer", "app"))
         self.assertTrue(bot["key"])
@@ -643,7 +644,7 @@ class PanelActionTests(Case):
         self.assertEqual((self.store.role_of("n1"), self.store.role_of("n2")), ("manager", "approver"))
         self.assertIn("msg=role_removed", self.location(self.act("boss", "/panel/remove-role", user_id="n1")))
         self.assertIsNone(self.store.role_of("n1"))
-        self.assertIn("msg=invalid", self.location(self.act("boss", "/panel/role", user_id="bad id!", role="approver")))
+        self.assertIn("msg=need_login", self.location(self.act("boss", "/panel/role", user_id="bad id!", role="approver")))   # not an ID: a username that has to log in first
         self.assertIn("msg=denied", self.location(self.act("boss", "/panel/role", user_id="n3", role="owner")))
 
     def test_new_roles_take_effect_right_away(self):
@@ -675,7 +676,7 @@ class PanelActionTests(Case):
 
     def test_not_logged_in_posts_do_nothing(self):
         r = self.call("POST", "/panel/approve", raw="bot_id=p1&owner_id=x&csrf=whatever", headers={"Content-Type": "application/x-www-form-urlencoded"})
-        self.assertEqual(r[3].getheader("Location"), "/")
+        self.assertEqual(r[3].getheader("Location"), "/?msg=login_needed")
         self.assertEqual(self.store.get_bot("p1")["status"], "pending")
 
     def test_the_whole_flow_from_first_contact_to_data(self):
@@ -769,7 +770,7 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
             one = json.load(open(os.path.join(data, "b1_data.json")))
             self.assertEqual((one["bot"]["key"], one["bot"]["last_report"]["servers"]["count"], list(one["members"])), (key, 7, ["v1"]))
-            self.assertEqual(list(json.load(open(path))), ["staff"])                                    # roles only; no bots in the main file
+            self.assertNotIn("bots", json.load(open(path)))                                    # roles only; no bots in the main file
             s2 = Store(path, owners=["boss"])
             bot = s2.get_bot("b1")
             self.assertEqual((bot["key"], bot["name"], bot["status"], bot["last_report"]["servers"]["count"]), (key, "Renamed", "approved", 7))
@@ -890,13 +891,13 @@ class MultipleBotsPanelTests(Case):
 
     def test_staff_see_who_applied_and_the_form_is_prefilled(self):
         self.act("own1", "/panel/apply", bot_id="b3")
-        page = self.view("boss", "/?tab=approvals")
+        page = self.view("boss", "/panel/approvals")
         self.assertIn("applied for by", page)
         self.assertIn('value="own1"', page)
 
     def test_applications_need_login_and_csrf(self):
         r = self.call("POST", "/panel/apply", raw="bot_id=zzz&csrf=x", headers={"Content-Type": "application/x-www-form-urlencoded"})
-        self.assertEqual(r[3].getheader("Location"), "/")
+        self.assertEqual(r[3].getheader("Location"), "/?msg=login_needed")
         self.assertIsNone(self.store.get_bot("zzz"))
         self.assertIn("msg=invalid", self.act("own1", "/panel/apply", bot_id="not valid!")[3].getheader("Location"))
 
@@ -1052,10 +1053,10 @@ class SharingPanelTests(Case):
 
     def test_staff_who_are_given_a_bot_get_the_my_bots_tab(self):
         self.store.share("own", "b1", "app", "viewer")
-        self.assertEqual(re.findall(r'<a href="/\?tab=(\w+)"', self.view("app")), ["approvals", "bots"])
+        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("app")), ["approvals", "bots", "people", "activity"])
 
     def test_approvers_can_switch_the_owner_to_a_new_account(self):
-        page = self.view("app", "/?tab=approvals")
+        page = self.view("app", "/panel/approvals")
         self.assertIn("Switch owner", page)
         self.assertNotIn("Remove access", page)               # approvers still can't remove access
         self.store.share("own", "b1", "v1", "viewer")
@@ -1070,9 +1071,203 @@ class SharingPanelTests(Case):
         self.assertIn("msg=denied", self.loc(self.act("own", "/panel/owner", bot_id="b1", owner_id="x")))   # the bot's owner can't hand it over alone
 
 
+class PanelFeatureTests(Case):
+    """People, stats, announcements, activity, timezones, API keys, the invite link and profile pictures."""
+
+    def setUp(self):
+        super().setUp()
+        self.store.set_role("boss", "man", "manager")
+        self.store.set_role("boss", "app", "approver")
+        for uid, name in (("boss", "TheBoss"), ("man", "Manny"), ("app", "Appy"), ("own", "Owny"), ("v1", "Viewy")):
+            self.store.record_login(uid, name, "https://files.yapper.website/avatars/" + uid + ".png", display=name.upper())
+        self.approve("b1", "own", "Promo Bot")
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot"}, "servers": {"count": 3}})
+
+    def location(self, response):
+        return response[3].getheader("Location")
+
+    def test_landing_always_shows_with_a_panel_button_when_logged_in(self):
+        out = self.call("GET", "/")[2]
+        self.assertIn('href="/login"', out)
+        self.assertNotIn('href="/panel"', out)
+        mine = self.call("GET", "/", user="own")
+        self.assertEqual(mine[0], 200)
+        self.assertIn("A small, optional report", mine[2])
+        self.assertIn('href="/panel"', mine[2])
+        self.assertNotIn('href="/login"', mine[2])
+
+    def test_search_by_username_or_id_and_ids_are_what_gets_saved(self):
+        found = self.call("GET", "/panel/search?q=owny", user="app")[1]
+        self.assertEqual([u["user_id"] for u in found], ["own"])
+        self.assertIn("Owny", self.view("app", "/panel/people?q=owny"))
+        self.assertIn("own", self.view("app", "/panel/people?q=ow"))
+        self.assertIn("log in to the panel first", self.view("app", "/panel/people?q=nobody-here"))
+        self.assertIn("msg=approved", self.location(self.act("app", "/panel/approve", bot_id="b2", owner_id="Viewy")))
+        self.assertEqual(self.store.get_bot("b2")["owner_id"], "v1")                      # typed a username, saved the ID
+        self.assertIn("msg=need_login", self.location(self.act("app", "/panel/approve", bot_id="b3", owner_id="no one")))
+        self.assertIsNone(self.store.get_bot("b3"))
+        self.assertEqual(self.call("GET", "/panel/search?q=owny")[0], 403)                # not logged in
+
+    def test_people_who_are_not_staff_only_get_exact_matches(self):
+        self.assertEqual(self.call("GET", "/panel/search?q=ow", user="v1")[1], [])
+        self.assertEqual([u["user_id"] for u in self.call("GET", "/panel/search?q=Owny", user="v1")[1]], ["own"])
+
+    def test_an_unseen_id_is_allowed_but_a_name_must_log_in_first(self):
+        store = Store(":memory:", owners=["boss"])                                         # default: IDs are digits
+        self.assertEqual(store.resolve_user("123456789"), "123456789")
+        with self.assertRaises(S.UserLookupError) as ctx:
+            store.resolve_user("someone")
+        self.assertEqual(ctx.exception.code, "need_login")
+        store.record_login("42", "someone", None)
+        self.assertEqual(store.resolve_user("@Someone"), "42")
+        store.record_login("43", "someone", None)
+        with self.assertRaises(S.UserLookupError) as ctx:
+            store.resolve_user("someone")
+        self.assertEqual(ctx.exception.code, "ambiguous")
+
+    def test_stats_are_for_owners_and_managers_only(self):
+        self.assertIn("People who logged in", self.view("boss", "/panel/stats"))
+        self.assertIn("People who logged in", self.view("man", "/panel/stats"))
+        self.assertNotIn("People who logged in", self.view("app", "/panel/stats"))
+        self.assertNotIn("People who logged in", self.view("own", "/panel/stats"))
+        self.assertEqual(self.store.user_stats()["total"], 5)
+
+    def test_announcements_wait_for_offline_people_until_dismissed(self):
+        self.assertIn("msg=announced", self.location(self.act("man", "/panel/announce", audience="all", title="Maintenance", body="Back soon")))
+        self.assertIn("msg=announced", self.location(self.act("man", "/panel/announce", audience="one", person="Owny", title="Hi Owny", body="Your bot is featured")))
+        text = self.view("own", "/panel/bots")
+        self.assertIn("Maintenance", text)
+        self.assertIn("Your bot is featured", text)
+        self.assertNotIn("Your bot is featured", self.view("v1", "/panel/bots"))
+        self.assertIn("Maintenance", self.view("v1", "/panel/bots"))
+        self.assertIn("Maintenance", self.view("own", "/settings"))                      # on every page, until dismissed
+        top = max(a["id"] for a in self.store.unread_for("own"))
+        self.assertIn("/panel", self.location(self.act("own", "/panel/dismiss", upto=str(top), back="/panel")))
+        self.assertNotIn("Maintenance", self.view("own", "/panel/bots"))
+        self.assertIn("Maintenance", self.view("v1", "/panel/bots"))                     # others still have it
+        for user in ("app", "own"):
+            self.assertIn("msg=denied", self.location(self.act(user, "/panel/announce", audience="all", title="x", body="y")))
+
+    def test_activity_levels(self):
+        self.act("app", "/panel/approve", bot_id="b2", owner_id="v1")
+        self.view("man", "/panel/team")                                                  # a manager opens the team tab
+        self.view("app", "/panel/approvals")
+        owner_view = self.view("boss", "/panel/activity")
+        self.assertIn("approved", owner_view)
+        self.assertIn("opened the team tab", owner_view)                                 # owners see views
+        approver_view = self.view("app", "/panel/activity")
+        self.assertIn("approved", approver_view)
+        self.assertNotIn("opened the team tab", approver_view)                           # approvers don't get the manager level
+        self.assertNotIn("Activity", self.view("own", "/panel/bots").split("<nav", 1)[1].split("</nav>")[0])
+        self.assertIn("Activity on this bot", self.view("own", "/panel/bots"))
+
+    def test_bot_owner_sees_what_others_did_to_their_bot(self):
+        self.act("own", "/panel/share", bot_id="b1", user_id="Viewy", level="viewer")
+        self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")
+        events = [(e["kind"], e["actor"]) for e in self.store.read_audit(bot_id="b1")]
+        self.assertIn(("bot.share", "own"), events)
+        self.assertIn(("bot.invite", "own"), events)
+        self.assertIn("gave access to", self.view("own", "/panel/bots"))
+
+    def test_times_follow_the_viewers_timezone(self):
+        ts = 1_700_000_000                                                               # 2023-11-14 22:13:20 UTC
+        self.store.set_timezone("app", "UTC")
+        S.panel.set_context(S.panel.Context(self.store, "UTC"))
+        self.assertIn("2023-11-14 22:13 UTC", S.panel.when(ts))
+        S.panel.set_context(S.panel.Context(self.store, "Asia/Tokyo"))
+        self.assertIn("2023-11-15 07:13 JST", S.panel.when(ts))
+        S.panel.set_context(S.panel.Context(self.store, "auto"))
+        self.assertIn('<time datetime="2023-11-14T22:13:20Z">', S.panel.when(ts))
+        S.panel.set_context(S.panel.Context())
+        self.assertIn("msg=saved", self.location(self.act("own", "/panel/settings", timezone="America/New_York")))
+        self.assertEqual(self.store.timezone_of("own"), "America/New_York")
+        self.assertIn("msg=saved", self.location(self.act("own", "/panel/settings", timezone="UTC")))
+        self.assertEqual(self.store.timezone_of("own"), "UTC")
+        self.assertIn("msg=invalid", self.location(self.act("own", "/panel/settings", timezone="Mars/Base")))
+        self.assertIn("America/New York", self.view("own", "/settings"))
+
+    def test_api_keys_read_only_and_for_owned_or_managed_bots(self):
+        cookie, token = self.csrf("own")
+        r = self.call("POST", "/panel/api-key", raw=urllib.parse.urlencode({"csrf": token, "name": "dash"}), headers={
+            "Cookie": f"{auth.SESSION_COOKIE}={cookie}", "Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(r[0], 200)
+        key = re.search(r"uk_[\w-]+", r[2]).group(0)
+        self.assertNotIn(key, self.view("own", "/settings"))                             # shown once
+        self.assertNotIn(key, json.dumps(self.store._users))                             # only a hash is kept
+        hdr = {"Authorization": f"Bearer {key}"}
+        bots = self.call("GET", "/api/bots", headers=hdr)[1]["bots"]
+        self.assertEqual([b["bot_id"] for b in bots], ["b1"])
+        one = self.call("GET", "/api/bots/b1", headers=hdr)[1]
+        self.assertEqual(one["report"]["servers"]["count"], 3)
+        self.assertEqual(self.call("GET", "/api/bots/b1/history", headers=hdr)[1]["columns"][0], "time")
+        self.assertEqual(self.call("GET", "/api/bots/other", headers=hdr)[0], 404)
+        self.assertEqual(self.call("POST", "/api/bots", headers=hdr)[0], 404)            # read-only
+        self.assertEqual(self.call("GET", "/api/bots")[0], 401)
+        self.assertEqual(self.call("GET", "/api/bots", headers={"Authorization": "Bearer uk_nope"})[0], 401)
+        # people with a viewer share, and staff, get nothing from their own keys
+        self.store.share("own", "b1", "v1", "viewer")
+        viewer_key = self.store.create_api_key("v1", "v")
+        self.assertEqual(self.call("GET", "/api/bots", headers={"Authorization": f"Bearer {viewer_key}"})[1]["bots"], [])
+        staff_key = self.store.create_api_key("boss", "s")
+        self.assertEqual(self.call("GET", "/api/bots/b1", headers={"Authorization": f"Bearer {staff_key}"})[0], 404)
+        self.store.share("own", "b1", "v1", "manager")
+        self.assertEqual([b["bot_id"] for b in self.call("GET", "/api/bots", headers={"Authorization": f"Bearer {viewer_key}"})[1]["bots"]], ["b1"])
+        key_id = self.store.api_keys("own")[0]["id"]
+        self.assertIn("msg=key_removed", self.location(self.act("own", "/panel/api-key/remove", key_id=str(key_id))))
+        self.assertEqual(self.call("GET", "/api/bots", headers=hdr)[0], 401)
+
+    def test_api_key_limit(self):
+        for _ in range(S.MAX_API_KEYS if hasattr(S, "MAX_API_KEYS") else 5):
+            self.store.create_api_key("own", "k")
+        with self.assertRaises(ValueError):
+            self.store.create_api_key("own", "one more")
+
+    def test_invite_link_and_promo_line(self):
+        for bad in ("https://evil.example/invite/x", "http://www.yapin.gg/invite/x", "https://www.yapin.gg/invite/x y", "javascript:alert(1)"):
+            self.assertIn("msg=invalid", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url=bad)), bad)
+        self.assertIn("msg=invite_saved", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")))
+        page = self.view("own", "/panel/bots")
+        self.assertIn("[Promo Bot](https://www.yapin.gg/invite/promo)", page)
+        self.assertIn("[Promo Bot](https://www.yapin.gg/invite/promo)", self.view("app", "/panel/approvals"))   # staff can copy it too
+        self.assertIn("msg=denied", self.location(self.act("app", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
+        self.store.share("own", "b1", "v1", "viewer")
+        self.assertIn("msg=denied", self.location(self.act("v1", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
+        self.act("own", "/panel/invite", bot_id="b1", invite_url="")
+        self.assertIsNone(self.store.get_bot("b1")["invite_url"])
+
+    def test_pictures_only_come_from_trusted_hosts(self):
+        self.assertIn("https://files.yapper.website/avatars/own.png", self.view("boss", "/panel/people?q=own"))
+        self.store.record_login("evil", "Evil", "https://tracker.example/pixel.png")
+        text = self.view("boss", "/panel/people?q=evil")
+        self.assertNotIn("tracker.example", text)
+        csp = self.call("GET", "/", user="boss")[3].getheader("Content-Security-Policy")
+        self.assertIn("img-src 'self' data: https://files.yapper.website https://www.yapin.gg", csp)
+        self.assertNotIn("tracker.example", csp)
+
+    def test_big_reports_only_after_the_token_checks_out(self):
+        self.assertEqual(self.cfg.max_report_bytes, 2 * 1024 ** 3)
+        self.cfg.max_report_bytes = 300
+        self.store.set_role  # noqa: B018
+        key = self.store.get_bot("b1")["key"]
+        token = self.call("POST", "/", {"bot_id": "b1", "key": key})[1]["token"]
+        big = {"schema": 1, "bot": {"id": "b1"}, "extra": {"x": "y" * 500}}
+        self.assertEqual(self.call("POST", "/report", big, {"Authorization": f"Bearer {token}"})[0], 413)
+        self.assertEqual(self.call("POST", "/report", raw="x" * 200_000, headers={"Authorization": "Bearer nope"})[0], 401)   # no token, no big body
+        self.cfg.max_report_bytes = 10 * 1024 ** 2
+        self.assertEqual(self.call("POST", "/report", big, {"Authorization": f"Bearer {token}"})[0], 204)
+
+    def test_console_finds_people_and_leaves_announcements(self):
+        self.assertIn("own", S.run_command(self.store, "find owny"))
+        self.assertIn("5 people", S.run_command(self.store, "stats"))
+        self.assertIn("announcement left", S.run_command(self.store, "announce all Hello | Nice to see you"))
+        self.assertTrue(any(a["title"] == "Hello" for a in self.store.unread_for("own")))
+        self.assertIn("announcement left for v1", S.run_command(self.store, "announce Viewy Psst | Just you"))
+        self.assertIn("announce.send", S.run_command(self.store, "activity"))
+
+
 class ConsoleTests(unittest.TestCase):
     def setUp(self):
-        self.s = Store(":memory:", owners=["boss"])
+        self.s = Store(":memory:", owners=["boss"], id_pattern=r"^[\w-]+$")
 
     def run_(self, line):
         return S.run_command(self.s, line)

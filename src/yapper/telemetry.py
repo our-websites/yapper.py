@@ -86,12 +86,12 @@ def _sdk_version(bot):
 
 
 MAX_DESCRIPTION = 300
-_DESC_KEYS = ("bio", "description", "about", "about_me")
+_DESC_KEYS = ("bio",)
 _desc_cache = {}
 
 
 def _pick_description(*sources):
-    """The first non-empty bio/description text in these dicts (or in their nested "user"), cleaned and shortened; None if there is none."""
+    """The first non-empty bio text in these dicts (or in their nested "user"), cleaned and shortened; None if there is none."""
     for src in sources:
         for d in (src, src.get("user") if isinstance(src, dict) else None):
             if not isinstance(d, dict):
@@ -105,8 +105,7 @@ def _pick_description(*sources):
 
 
 def _description(bot, me, ttl=3600):
-    """The bot's own description (its bio). shapes-bot reads people's bios from the full user profile (bot.user(id): bio / about /
-    description), so that is tried after `me`, and last the bot's member info in a server it is in (a bot is always a member of its
+    """The bot's own description (its bio). shapes-bot reads people's bios from the full user profile (bot.user(id): bio), so that is tried after `me`, and last the bot's member info in a server it is in (a bot is always a member of its
     servers). Looked up at most once an hour; any failure just means no description."""
     key, now = id(bot), time.time()
     hit = _desc_cache.get(key)

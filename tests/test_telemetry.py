@@ -313,12 +313,12 @@ class ReportTests(TelemetryCase):
         t._desc_cache.clear()
         self.assertEqual(t._description(FakeBot({}), {"id": "b", "bio": "  Rolls\n dice\x00 "}), "Rolls dice")
         t._desc_cache.clear()
-        self.assertEqual(t._description(FakeBot({"profile": {"about": "From the user profile"}}), {"id": "b"}), "From the user profile")
+        self.assertEqual(t._description(FakeBot({"profile": {"bio": "From the user profile"}}), {"id": "b"}), "From the user profile")
         t._desc_cache.clear()
         self.assertEqual(t._description(FakeBot({"user": {"bio": "From member info"}}), {"id": "b"}), "From member info")
         t._desc_cache.clear()
-        self.assertEqual(t._description(FakeBot({"description": "x" * 900}), {"id": "b"}), "x" * t.MAX_DESCRIPTION)
-        for bad in (RuntimeError("down"), {}, {"bio": 5}):
+        self.assertEqual(t._description(FakeBot({"bio": "x" * 900}), {"id": "b"}), "x" * t.MAX_DESCRIPTION)
+        for bad in (RuntimeError("down"), {}, {"bio": 5}, {"about": "ignored", "description": "ignored"}):
             t._desc_cache.clear()
             self.assertIsNone(t._description(FakeBot(bad), {"id": "b"}))
         t._desc_cache.clear()

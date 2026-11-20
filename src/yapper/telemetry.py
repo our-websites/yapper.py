@@ -105,13 +105,19 @@ def _pick_description(*sources):
 
 
 def _description(bot, me, ttl=3600):
-    """The bot's own description. It is on the bot's profile (`me`), and failing that on its member info in a server it is in (a bot
-    is always a member of the servers it is in). Looked up at most once an hour; any failure just means no description."""
+    """The bot's own description (its bio). shapes-bot reads people's bios from the full user profile (bot.user(id): bio / about /
+    description), so that is tried after `me`, and last the bot's member info in a server it is in (a bot is always a member of its
+    servers). Looked up at most once an hour; any failure just means no description."""
     key, now = id(bot), time.time()
     hit = _desc_cache.get(key)
     if hit and hit[0] > now:
         return hit[1]
     text = _pick_description(me)
+    if text is None and me.get("id"):
+        try:
+            text = _pick_description(dict(bot.user(me["id"])))
+        except Exception:
+            text = None
     if text is None:
         try:
             for server in list(bot.servers())[:3]:

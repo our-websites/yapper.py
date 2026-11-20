@@ -301,6 +301,10 @@ class ReportTests(TelemetryCase):
                 self._member, self._servers = member, servers
             def servers(self):
                 return list(self._servers)
+            def user(self, uid):
+                if isinstance(self._member, dict) and "profile" in self._member:
+                    return self._member["profile"]
+                raise RuntimeError("no profile")
             def member(self, sid, uid):
                 if isinstance(self._member, Exception):
                     raise self._member
@@ -308,6 +312,8 @@ class ReportTests(TelemetryCase):
         t = self.t
         t._desc_cache.clear()
         self.assertEqual(t._description(FakeBot({}), {"id": "b", "bio": "  Rolls\n dice\x00 "}), "Rolls dice")
+        t._desc_cache.clear()
+        self.assertEqual(t._description(FakeBot({"profile": {"about": "From the user profile"}}), {"id": "b"}), "From the user profile")
         t._desc_cache.clear()
         self.assertEqual(t._description(FakeBot({"user": {"bio": "From member info"}}), {"id": "b"}), "From member info")
         t._desc_cache.clear()

@@ -1588,6 +1588,22 @@ class BadgeTests(Case):
         self.assertIn("default-src 'none'", resp.getheader("Content-Security-Policy"))
         self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
 
+    def test_featured_badge_lists_approved_bots_only(self):
+        self.store.record_login("own2", "Two", None)
+        self.store.apply("own2", "pending1")
+        self.store.see_bot("pending1", "Waiting Bot")
+        self.store.set_invite("own1", "b1", "")          # shown even without an invite link
+        status, _, text, resp = self.call("GET", "/badge/featured.svg")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "image/svg+xml")
+        self.assertIn("&lt;b&gt;Dice&lt;/b&gt;", text)
+        self.assertNotIn("Waiting Bot", text)
+        self.assertNotIn("<b>Dice", text)
+        self.assertIn("3 servers", text)
+
+    def test_featured_badge_with_no_bots(self):
+        self.assertIn("No approved bots yet", __import__("telemetry_badge").featured_badge([]).decode())
+
     def test_bot_badge_escapes_the_name(self):
         status, _, text, _ = self.call("GET", "/badge/b1.svg")
         self.assertEqual(status, 200)

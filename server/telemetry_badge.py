@@ -105,3 +105,34 @@ def stats_badge(bots, servers):
             f'<text x="{left + 14}" y="29" {FONT} font-size="13" fill="{TEXT}"><tspan font-weight="600">{bots_text}</tspan>'
             f'<tspan fill="{MUTED}">  ·  </tspan><tspan>{servers_text}</tspan></text>')
     return _svg(width, 48, label, body)
+
+
+def featured_badge(bots, columns=3, limit=24):
+    """A grid of every approved bot: icon (or first letter), name and server count. `bots` is [(name, servers, icon data URI or None)]."""
+    bots = list(bots)[:limit]
+    cell_w, cell_h, pad = 210, 48, 8
+    if not bots:
+        body = f'<text x="16" y="29" {FONT} font-size="13" fill="{MUTED}">No approved bots yet</text>'
+        return _svg(190, 48, "No approved bots yet", body)
+    cols = min(columns, len(bots))
+    rows = (len(bots) + cols - 1) // cols
+    width, height = cols * cell_w + (cols + 1) * pad, rows * cell_h + (rows + 1) * pad
+    out, names = [], []
+    for i, (name, servers, icon) in enumerate(bots):
+        x, y = pad + (i % cols) * (cell_w + pad), pad + (i // cols) * (cell_h + pad)
+        title = _clean(name or "Bot", 22)
+        names.append(title)
+        sub = f"{int(servers):,} server{'s' if int(servers) != 1 else ''}" if isinstance(servers, int) and not isinstance(servers, bool) and servers >= 0 else ""
+        cx, cy = x + 28, y + 24
+        if icon and icon.startswith("data:image/"):
+            pic = (f'<clipPath id="c{i}"><circle cx="{cx}" cy="{cy}" r="14"/></clipPath>'
+                   f'<image x="{cx - 14}" y="{cy - 14}" width="28" height="28" clip-path="url(#c{i})" preserveAspectRatio="xMidYMid slice" href="{icon}" xlink:href="{icon}"/>')
+        else:
+            letter = _clean((str(name or "?").strip() or "?")[0].upper(), 1)
+            pic = (f'<circle cx="{cx}" cy="{cy}" r="14" fill="#1c2340"/><text x="{cx}" y="{cy + 5.5}" text-anchor="middle" {FONT} font-size="15" font-weight="600" fill="{ACCENT}">{letter}</text>')
+        out.append(f'<rect x="{x + .5}" y="{y + .5}" width="{cell_w - 1}" height="{cell_h - 1}" rx="8" fill="{BG}" stroke="{LINE}"/>{pic}'
+                   f'<text x="{x + 52}" y="{y + (22 if sub else 29)}" {FONT} font-size="14" font-weight="600" fill="{TEXT}">{title}</text>'
+                   + (f'<text x="{x + 52}" y="{y + 37}" {FONT} font-size="11" fill="{MUTED}">{sub}</text>' if sub else ""))
+    label = "yapper.py bots: " + ", ".join(names)
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+            f'role="img" aria-label="{label}"><title>{label}</title>{"".join(out)}</svg>').encode()

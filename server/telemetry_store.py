@@ -33,6 +33,28 @@ DEFAULT_INTERVAL = 1800
 CONSOLE = "console"                             # the actor name used by the console: it can do everything an owner can
 
 
+def clean_avatar(value):
+    """A bot's picture as an https link. Older bots report Yapin's path (avatar/path.png): that lives under files.yapper.website/avatars/."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 300:
+        return None
+    value = value.strip()
+    if value.startswith("https://"):
+        return value.replace(" ", "%20")
+    if value.startswith("/") and not value.startswith("//"):
+        return "https://www.yapin.gg" + value.replace(" ", "%20")
+    if re.match(r"^[\w./~-][\w./ ~%-]*$", value) and ".." not in value and not value.startswith("//"):
+        return "https://files.yapper.website/avatars/" + value.lstrip("/").replace(" ", "%20")
+    return None
+
+
+def clean_description(value, limit=300):
+    """A bot's own description as one line of plain text, or None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(c if c >= " " and c != "\x7f" else " " for c in value).split())
+    return text[:limit] or None
+
+
 INVITE = re.compile(r"^https://(?:www\.)?yapin\.gg/(?:invite|i|bot)/[A-Za-z0-9_-]{2,64}$")
 
 
@@ -78,10 +100,12 @@ def can_remove_roles(role):
 
 
 def bot_state(bot, now=None):
-    """(code, label) for where a bot stands: pending, waiting, active, quiet or removed."""
+    """(code, label) for where a bot stands: pending, denied, waiting, active, quiet or removed."""
     now = now or time.time()
     if bot["status"] == "pending":
         return "pending", "Pending approval"
+    if bot["status"] == "denied":
+        return "denied", "Denied"
     if bot["status"] == "revoked":
         return "removed", "Access removed"
     if not bot["last_report_at"]:
@@ -89,6 +113,13 @@ def bot_state(bot, now=None):
     if now - bot["last_report_at"] <= bot["interval"] * 2.2:
         return "active", "Active"
     return "quiet", "Quiet: no report for a while"
+
+
+MIN_REASON, MAX_REASON = 5, 500
+
+
+class ReasonRequired(ValueError):
+    pass
 
 
 class UserLookupError(ValueError):
@@ -102,7 +133,8 @@ class UserLookupError(ValueError):
 def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
-           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None}
+           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None, "support_url": None, "description": None,
+           "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None}
     bot.update(fields)
     return bot
 
@@ -383,7 +415,20 @@ class Store:
             if bot is None:
                 bot, members = _new_bot(bot_id, now), {}
             bot.update(status="approved", owner_id=owner_id, key=bot["key"] or new_key(), approved_by=str(by), approved_at=now,
-                       name=bot["name"] or name)
+                       name=bot["name"] or name, deny_reason=None, denied_by=None, denied_at=None)
+            self._put(bot, members)
+            return dict(bot)
+
+    def deny(self, bot_id, by, reason, now=None):
+        """Say no to a bot that is waiting, with a reason the owner will see. A denied bot can still be approved later."""
+        reason = " ".join(str(reason or "").split())
+        if len(reason) < MIN_REASON:
+            raise ReasonRequired(f"Write a reason of at least {MIN_REASON} characters: the bot's owner sees it.")
+        with self._lock:
+            bot, members = self._read(str(bot_id).strip())
+            if not bot or bot["status"] != "pending":
+                raise ValueError("Only a bot that is waiting for approval can be denied.")
+            bot.update(status="denied", deny_reason=reason[:MAX_REASON], denied_by=str(by), denied_at=int(now or time.time()))
             self._put(bot, members)
             return dict(bot)
 
@@ -495,9 +540,11 @@ class Store:
                 samples.append([now] + [servers.get(k) if isinstance(servers.get(k), int) else None for k in ("count", "members_total", "online_total")]
                                + [len(cmds) if isinstance(cmds, list) else None])
                 samples = samples[-MAX_SAMPLES:]
-            avatar = info.get("avatar")
-            bot.update(last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
-                       avatar=avatar if isinstance(avatar, str) and avatar.startswith("https://") and len(avatar) <= 300 else bot.get("avatar"),
+            avatar = clean_avatar(info.get("avatar"))
+            count = (report.get("servers") or {}).get("count") if isinstance(report.get("servers"), dict) else None
+            bot.update(servers=count if isinstance(count, int) and not isinstance(count, bool) and 0 <= count < 10 ** 9 else bot.get("servers"),
+                       last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
+                       avatar=avatar or bot.get("avatar"), description=clean_description(info.get("description")) or bot.get("description"),
                        sdk_version=str(sdk.get("version") or "")[:32] or bot["sdk_version"],
                        package_version=str(sdk.get("package_version") or "")[:32] or bot["package_version"])
             self._put(bot, members, urgent=False)
@@ -523,8 +570,8 @@ class Store:
         user_id = str(user_id)
         verified = self.is_verified_owner(user_id)
         with self._lock:
-            rows = [dict(b) for b in self._pending()
-                    if b["owner_id"] is None and (b["applicant_id"] == user_id or (not verified and b["claimed_owner_id"] == user_id))]
+            rows = [dict(b) for b in self._index.values()
+                    if b["status"] in ("pending", "denied") and b["owner_id"] is None and (b["applicant_id"] == user_id or (not verified and b["claimed_owner_id"] == user_id))]
         return sorted(rows, key=lambda b: b["first_seen"], reverse=True)
 
     def apply(self, user_id, bot_id, now=None):
@@ -535,6 +582,8 @@ class Store:
         now = int(now or time.time())
         with self._lock:
             bot, members = self._read(bot_id)
+            if bot and bot["status"] == "denied":
+                raise ValueError(f"That bot was denied: {bot['deny_reason']} If you have fixed that, ask in the support server.")
             if bot and bot["status"] != "pending":
                 raise ValueError("That bot is already registered. If it is yours, ask in the support server.")
             if bot and bot["applicant_id"] and bot["applicant_id"] != user_id:
@@ -569,6 +618,18 @@ class Store:
                 raise PermissionError("That is not your bot.")
             bot, members = self._read(bot_id)
             bot["invite_url"] = url or None
+            self._put(bot, members)
+
+    def set_support(self, user_id, bot_id, url):
+        """The bot's support server link (a yapin.gg invite). Only its owner or a manager they added; empty clears it."""
+        url = str(url or "").strip()
+        if url and (not valid_invite(url) or "/bot/" in url):
+            raise ValueError("That must be a https://www.yapin.gg/invite/... link to your support server.")
+        with self._lock:
+            if self.access_level(bot_id, user_id) not in ("owner", "manager"):
+                raise PermissionError("That is not your bot.")
+            bot, members = self._read(bot_id)
+            bot["support_url"] = url or None
             self._put(bot, members)
 
     def with_status(self, status):

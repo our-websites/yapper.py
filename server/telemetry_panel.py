@@ -18,9 +18,9 @@ EXAMPLE_REPORT = {
     "schema": 1,
     "event": "heartbeat",
     "sent_at": "2026-03-14T18:30:12+00:00",
-    "sdk": {"version": "1.8.4", "package_version": "1.8.4", "yapin_version": "1.8.4"},
+    "sdk": {"version": "1.8.4", "package_version": "1.8.4"},
     "runtime": {"python": "3.12.3", "os": "Linux"},
-    "bot": {"id": "123456789", "username": "Cool Bot", "avatar": "https://cdn.example/avatars/123456789.png", "uptime_seconds": 86412},
+    "bot": {"id": "123456789", "username": "Cool Bot", "avatar": "https://cdn.example/avatars/123456789.png", "description": "Rolls dice for your server.", "uptime_seconds": 86412},
     "servers": {"count": 14, "members_total": 2310, "online_total": 412},
     "commands": [
         {"name": "ping", "description": "Check if the bot is alive", "options": []},
@@ -43,9 +43,12 @@ MESSAGES = {
     "ambiguous": ("bad", "More than one person has that username. Use their user ID."),
     "announced": ("ok", "Announcement sent. It waits for anyone who is offline until they next open the page."),
     "saved": ("ok", "Saved."),
+    "support_saved": ("ok", "Support server link saved."),
     "invite_saved": ("ok", "Invite link saved. Copy the promo link from the bot\'s Invite link section."),
     "key_removed": ("ok", "API key removed. It stops working right away."),
     "login_needed": ("bad", "Log in to open the panel."),
+    "bot_denied": ("ok", "Bot denied. Its owner can see your reason in the panel, and the bot is told the next time it asks."),
+    "reason_needed": ("bad", "Write a reason for denying it: the bot's owner sees it."),
     "revoked": ("ok", "Access removed. The bot will be told on its next report."),
     "owner": ("ok", "Owner changed."),
     "role_added": ("ok", "Role saved."),
@@ -107,13 +110,13 @@ ol.steps li{margin:.7rem 0;padding-left:.3rem;max-width:68ch}
 .row{display:grid;grid-template-columns:.3rem minmax(0,1fr);background:var(--surface);border:1px solid var(--line);border-radius:.6rem;margin-bottom:.9rem;overflow:hidden}
 .row>.edge{background:var(--line)}
 .row.active>.edge,.row.approved>.edge{background:var(--ok)}.row.pending>.edge,.row.waiting>.edge{background:var(--wait)}
-.row.quiet>.edge{background:var(--wait)}.row.removed>.edge{background:var(--bad)}
+.row.quiet>.edge{background:var(--wait)}.row.removed>.edge,.row.denied>.edge{background:var(--bad)}
 .row .in{padding:1rem 1.15rem}
 .head{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:baseline}
 .status{font-size:.9rem;display:inline-flex;gap:.45rem;align-items:center}
 .dot{width:.6rem;height:.6rem;border-radius:50%;background:var(--muted);display:inline-block}
 .active .dot{background:var(--ok);animation:pulse 2.4s ease-in-out infinite}
-.pending .dot,.waiting .dot,.quiet .dot{background:var(--wait)}.removed .dot{background:var(--bad)}
+.pending .dot,.waiting .dot,.quiet .dot{background:var(--wait)}.removed .dot,.denied .dot{background:var(--bad)}
 @keyframes pulse{50%{opacity:.35}}
 @media(prefers-reduced-motion:reduce){.active .dot{animation:none}}
 .id{font-family:var(--mono);font-size:.82rem;color:var(--muted)}
@@ -155,9 +158,37 @@ footer{border-top:1px solid var(--line);color:var(--muted);font-size:.85rem;padd
 """
 
 JS = """
-for (const el of document.querySelectorAll('time[datetime]')) {
-  const d = new Date(el.getAttribute('datetime'));
-  if (!isNaN(d)) el.textContent = d.toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+function localTimes(root) {
+  for (const el of root.querySelectorAll('time[datetime]')) {
+    const d = new Date(el.getAttribute('datetime'));
+    if (!isNaN(d)) el.textContent = d.toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+  }
+}
+localTimes(document);
+for (const box of document.querySelectorAll('[data-live]')) {
+  const every = Math.max(10, Number(box.dataset.every) || 30) * 1000;
+  let failures = 0, busy = false;
+  const refresh = async () => {
+    if (!document.hidden && !busy) {
+    busy = true;
+    try {
+      const open = Array.from(box.querySelectorAll('details')).map(d => d.open);
+      const r = await fetch(box.dataset.live, {credentials: 'same-origin', headers: {'Accept': 'text/html'}});
+      if (!r.ok) throw new Error(r.status);
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const fresh = doc.querySelector('.live');
+      if (fresh) {
+        box.replaceChildren(...Array.from(fresh.childNodes).map(n => document.importNode(n, true)));
+        Array.from(box.querySelectorAll('details')).forEach((d, i) => { d.open = !!open[i]; });
+        localTimes(box);
+      }
+      failures = 0;
+    } catch (e) { failures += 1; }
+    busy = false;
+    }
+    setTimeout(refresh, every * Math.min(1 + failures, 6));
+  };
+  setTimeout(refresh, every);
 }
 for (const input of document.querySelectorAll('input[data-people]')) {
   const wrap = input.parentElement; wrap.classList.add('field');
@@ -221,8 +252,8 @@ def ago(seconds):
 class Context:
     """Per-request facts the page helpers need: who is looking (timezone, role), the store, and which image hosts are allowed."""
 
-    def __init__(self, store=None, tz="auto", avatar_hosts=(), staff=False):
-        self.store, self.tz, self.avatar_hosts, self.staff = store, tz, frozenset(avatar_hosts), staff
+    def __init__(self, store=None, tz="auto", avatar_hosts=(), staff=False, base=""):
+        self.store, self.tz, self.avatar_hosts, self.staff, self.base = store, tz, frozenset(avatar_hosts), staff, base
 
 
 _ctx = contextvars.ContextVar("panel_ctx", default=Context())
@@ -415,7 +446,7 @@ def _facts(report):
     up = bot.get("uptime_seconds")
     items = [("Servers", servers.get("count")), ("Members", servers.get("members_total")), ("Online", servers.get("online_total")),
              ("Commands", len(report.get("commands") or [])),
-             ("SDK version (main.py)", sdk.get("yapin_version") or sdk.get("version")), ("PyPI version", sdk.get("package_version")),
+             ("SDK version (main.py)", sdk.get("version")), ("PyPI version", sdk.get("package_version")),
              ("Uptime", ago(up) if isinstance(up, (int, float)) else None)]
     return '<dl class="facts">' + "".join(f"<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in items if v is not None) + "</dl>"
 
@@ -450,8 +481,8 @@ def growth(bot):
 
 
 EVENT_TEXT = {
-    "bot.approve": "approved", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
-    "bot.invite": "set the invite link of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
+    "bot.approve": "approved", "bot.deny": "denied", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
+    "bot.invite": "set the invite link of", "bot.support": "set the support server of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
     "key.rotate": "made a new private key for", "role.add": "gave a role to", "role.remove": "removed the role of", "announce.send": "sent an announcement to",
     "page.view": "opened the", "apikey.create": "made an API key", "apikey.remove": "removed an API key", "api.read": "read data through the API for",
     "settings.timezone": "changed their timezone to",
@@ -488,42 +519,82 @@ def _commands(report):
     return f"<details><summary>Commands ({len(cmds)})</summary><table><tbody>{rows}</tbody></table></details>"
 
 
-def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", members=()):
+def bot_title(bot):
+    return bot.get("name") or bot["bot_id"]
+
+
+def bot_live(bot, now, level="owner", link=True, poll=False):
+    """The part of a bot's card that changes as reports come in (status, numbers, growth, latest report). The bot page refreshes just this."""
     code, label = bot_state(bot, now)
     name = bot["name"] or "Unnamed bot"
     report = bot.get("last_report")
-    parts = [f'<div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3>{esc(name)}</h3></div><span class="status"><span class="dot"></span>{esc(label)}</span></div>',
+    title = f'<a href="/bots/{esc(bot["bot_id"])}">{esc(name)}</a>' if link and bot["status"] == "approved" else esc(name)
+    parts = [f'<div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3>{title}</h3></div><span class="status"><span class="dot"></span>{esc(label)}</span></div>',
              f'<div class="id">{esc(bot["bot_id"])}</div>']
+    if bot.get("description") and code not in ("pending", "denied", "removed"):
+        parts.append(f'<p class="desc">{esc(bot["description"])}</p>')
+    if bot.get("support_url") and code not in ("pending", "denied", "removed"):
+        parts.append(f'<p class="small"><a href="{esc(bot["support_url"])}" rel="noopener">Support server</a></p>')
+    if level != "owner" and code not in ("pending", "denied"):
+        parts.append(f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
     if code == "pending":
         parts.append('<p class="muted">The bot has asked to send telemetry. It is waiting for someone on the team to approve it. '
                      'Nothing is shared until then, and you will see its data and private key here once it is.</p>')
+    elif code == "denied":
+        parts.append(f'<div class="banner"><h3>Denied</h3><p>{esc(bot.get("deny_reason"))}</p>'
+                     '<p class="muted small">If you have fixed that, ask in the support server and mention the bot\'s ID. The team can approve it again.</p></div>')
     elif code == "removed":
         parts.append('<p class="muted">Telemetry access for this bot was removed. Ask in the support server if you think that is a mistake.</p>')
     else:
         parts.append(track(bot, now))
         if code == "waiting":
             parts.append('<p class="muted">Set the private key below as <code>TELEMETRY_KEY</code> in the bot\'s environment or <code>.env</code> and restart it.</p>')
-        parts.append(_facts(report))
-        parts.append(growth(bot))
-        parts.append(_extra(report))
-        parts.append(_commands(report))
+        parts += [_facts(report), growth(bot), _extra(report), _commands(report)]
         if report:
             parts.append(f"<details><summary>Latest report</summary><pre><code>{esc(json.dumps(report, indent=2))}</code></pre></details>")
+    attrs = f' data-live="/bots/{esc(bot["bot_id"])}/live" data-every="30"' if poll else ""
+    return f'<div class="live"{attrs}>{"".join(parts)}</div>'
+
+
+def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", members=(), poll=False):
+    code, _ = bot_state(bot, now)
+    parts = [bot_live(bot, now, level, link=not poll, poll=poll)]
+    if code not in ("pending", "removed", "denied"):
         if key_box and bot.get("key") and level in ("owner", "manager"):
             parts.append(f'<div class="key" data-key-for="{esc(bot["bot_id"])}"><span class="muted small">Private key</span>'
                          f'<output aria-live="polite">{"&bull;" * 24}</output><button type="button">Show key</button></div>'
                          f'<form class="inline" method="post" action="/panel/rotate-key"><input type="hidden" name="csrf" value="{esc(csrf)}">'
                          f'<input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
                          f'<button type="submit">Make a new key</button> <span class="muted small">The old key stops working right away.</span></form>')
-    if level != "owner" and code != "pending":
-        parts.insert(2, f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
-    if code != "pending" and bot["status"] == "approved" and level in ("owner", "manager"):
+    if code not in ("pending", "denied") and bot["status"] == "approved" and level in ("owner", "manager"):
         parts.append(invite_section(bot, csrf))
         parts.append(access_section(bot, csrf, level, members))
-    if code not in ("pending", "removed") and _ctx.get().store:
+    if code not in ("pending", "removed", "denied") and _ctx.get().store:
         events = _ctx.get().store.read_audit(("approver", "manager"), bot_id=bot["bot_id"], limit=15)
         parts.append(f'<details><summary>Activity on this bot</summary>{activity_table(events, show_bot=False)}</details>')
     return f'<div class="row {code}"><div class="edge"></div><div class="in">{"".join(parts)}</div></div>'
+
+
+def bot_page(bot, session_csrf, now, level, members):
+    """/bots/<id>: one bot's data, for its owner, managers and viewers. The live part refreshes by itself."""
+    row = owner_row(bot, session_csrf, now, level=level, members=members, poll=True)
+    return (f'<p class="small"><a href="/panel/bots">&larr; My bots</a></p>{row}'
+            '<p class="muted small" data-poll-note>This page refreshes by itself every 30 seconds while it is open.</p>')
+
+
+def staff_bot_page(bot, role, csrf, now, store):
+    """/panel/<bot id>: what the team sees about a bot: status and who owns it, never its data or key."""
+    levels = ("approver", "manager") if role in ("owner", "manager") else ("approver",)
+    events = store.read_audit(levels, bot_id=bot["bot_id"], limit=30)
+    promo = promo_line(bot)
+    live = badge_line(bot)
+    live_box = (f'<p class="muted small">Or a live badge that updates its own server count, so the README never needs editing (the bot also needs its invite link saved):</p>'
+                f'<textarea readonly rows="2" aria-label="Live badge">{esc(live)}</textarea>') if live else ""
+    box = (f'<section><h3>README link</h3><p class="muted small">Markdown with the bot\'s icon and name, as one link that opens the bot to add it.</p>'
+           f'<textarea readonly rows="3" aria-label="README link">{esc(promo)}</textarea>{live_box}</section>') if promo else \
+          '<section><h3>README link</h3><p class="muted small">There is no invite link for this bot yet. Its owner can save one on their bot page.</p></section>'
+    return (f'<p class="small"><a href="/panel/approvals">&larr; Approvals</a></p>{staff_row(bot, role, csrf, now)}{box}'
+            f'<section><h3>Activity on this bot</h3>{activity_table(events, show_bot=False)}</section>')
 
 
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -538,27 +609,44 @@ def invite_for(bot):
 
 
 def promo_line(bot):
-    """The README line for a bot: its icon and name as one link that opens the bot's page to add it. Plain HTML inside Markdown,
-    which GitHub shows with the icon at a fixed small size."""
+    """The README line for a bot, in Markdown: one link whose text is the bot's icon and name, so pressing either opens the bot to add it.
+    The icon is an <img> inside the link text (GitHub allows that, and it keeps the icon small)."""
     url = invite_for(bot)
     if not url:
         return ""
-    name = html.escape(bot.get("name") or bot["bot_id"], quote=True)
+    name = (bot.get("name") or bot["bot_id"]).replace("\\", "\\\\")
+    for ch in "[]*_`<>&|":
+        name = name.replace(ch, "\\" + ch)
+    name = " ".join(name.split())
     icon = bot.get("avatar")
-    img = f'<img src="{html.escape(icon, quote=True)}" width="24" height="24" alt="" align="absmiddle"> ' if isinstance(icon, str) and icon.startswith("https://") else ""
-    return f'<a href="{html.escape(url, quote=True)}">{img}<b>{name}</b></a>'
+    img = f'<img src="{html.escape(icon, quote=True)}" width="24" height="24" align="absmiddle"> ' if isinstance(icon, str) and icon.startswith("https://") else ""
+    return f"[{img}**{name}**]({url.replace(' ', '%20').replace(')', '%29').replace('(', '%28')})"
+
+
+def badge_line(bot):
+    """The README line that never needs editing: a live badge (drawn by this server from the current numbers) linked to the invite."""
+    url, base = invite_for(bot), _ctx.get().base
+    if not url or not base or bot.get("status") != "approved":
+        return ""
+    name = " ".join((bot.get("name") or bot["bot_id"]).split())
+    for ch in "\\[]":
+        name = name.replace(ch, "\\" + ch)
+    return f"[![{name}]({base}/badge/{urllib.parse.quote(bot['bot_id'], safe='')}.svg)]({url.replace(' ', '%20').replace(')', '%29').replace('(', '%28')})"
 
 
 def invite_section(bot, csrf):
-    """Owners and managers set the bot's yapin.gg invite link here and copy it, or the README line made from it."""
+    """Owners and managers save the bot's yapin.gg link here. (The ready-to-paste README link is made for the team, in the staff panel.)"""
     hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
-    line = promo_line(bot)
-    shown = (f'<p class="muted small">Copy this into your README or page. It shows your bot\'s icon and name, and pressing it opens the bot to add it:</p>'
-             f'<input readonly value="{esc(line)}" aria-label="Promo link"><p class="small">Preview: {line}{"" if bot.get("invite_url") else " <span class=muted>(made from the bot ID; save a link below to use another)</span>"}</p>'
-             f'<p><a href="{esc(invite_for(bot))}" rel="noopener">Open the invite</a></p>') if line else \
-            '<p class="muted small">Add your bot\'s yapin.gg link (https://yapin.gg/bot/...) and the panel will make a ready-to-paste link with its icon and name.</p>'
+    link = invite_for(bot)
+    shown = (f'<p class="small">Invite link: <a href="{esc(link)}" rel="noopener">{esc(link)}</a>'
+             f'{"" if bot.get("invite_url") else " <span class=muted>(made from the bot ID; save a link below to use another)</span>"}</p>') if link else \
+            '<p class="muted small">Add your bot\'s yapin.gg link (https://yapin.gg/bot/...) so people can add it from lists the team features.</p>'
     return (f'<details><summary>Invite link</summary>{shown}<form class="inline" method="post" action="/panel/invite">{hidden}'
             f'<label>yapin.gg invite link<input name="invite_url" value="{esc(bot.get("invite_url"))}" placeholder="https://www.yapin.gg/invite/yourbot" autocomplete="off"></label>'
+            f'<button type="submit">Save</button></form></details>'
+            f'<details><summary>Support server</summary><p class="muted small">Shown on your bot\'s page so people can get help. Your bot\'s description is read from its own profile; change it in your bot (set_profile).</p>'
+            f'<form class="inline" method="post" action="/panel/support">{hidden}'
+            f'<label>yapin.gg invite link<input name="support_url" value="{esc(bot.get("support_url"))}" placeholder="https://www.yapin.gg/invite/yourserver" autocomplete="off"></label>'
             f'<button type="submit">Save</button></form></details>')
 
 
@@ -586,6 +674,9 @@ def staff_row(bot, role, csrf, now):
         if bot["claimed_owner_id"] and bot["claimed_owner_id"] != bot.get("applicant_id"):
             meta.append(f'<span class="muted small">bot says its owner is <span class="id">{esc(bot["claimed_owner_id"])}</span> (not verified)</span>')
         meta.append(f'<span class="muted small">first seen {when(bot["first_seen"])}</span>')
+    elif bot["status"] == "denied":
+        meta.append(f'<span class="muted small">denied by <span class="id">{esc(bot["denied_by"])}</span> {when(bot["denied_at"])}</span>')
+        meta.append(f'<span class="muted small">reason: {esc(bot["deny_reason"])}</span>')
     else:
         meta.append(f'<span class="muted small">owner <span class="id">{esc(bot["owner_id"] or "not set")}</span></span>')
         meta.append(f'<span class="muted small">last report {when(bot["last_report_at"])}</span>')
@@ -594,7 +685,10 @@ def staff_row(bot, role, csrf, now):
     if bot["status"] == "pending" and can_approve(role):
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
                  f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(bot.get("applicant_id") or bot["claimed_owner_id"])}" autocomplete="off"></label>'
-                 f'<button class="primary" type="submit">Approve</button></form>')
+                 f'<button class="primary" type="submit">Approve</button></form>'
+                 f'<form class="inline" method="post" action="/panel/deny">{hidden}'
+                 f'<label>Reason for denying (the owner sees it)<input name="reason" required minlength="5" maxlength="500" size="48" autocomplete="off"></label>'
+                 f'<button class="danger" type="submit">Deny</button></form>')
     elif bot["status"] == "approved" and can_change_owner(role):
         forms = (f'<form class="inline" method="post" action="/panel/owner">{hidden}'
                  f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(bot["owner_id"])}" autocomplete="off"></label>'
@@ -603,16 +697,18 @@ def staff_row(bot, role, csrf, now):
                  f'<p class="muted small">Switching owner is for people who moved to a new account. It also ends any sharing the old owner set up.</p>')
         if can_revoke(role):
             forms += f'<form class="inline" method="post" action="/panel/revoke">{hidden}<button class="danger" type="submit">Remove access</button></form>'
-    elif bot["status"] == "revoked" and can_approve(role):
+    elif bot["status"] in ("revoked", "denied") and can_approve(role):
+        owner = bot["owner_id"] or bot.get("applicant_id") or bot["claimed_owner_id"]
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
-                 f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(bot["owner_id"])}" autocomplete="off"></label>'
-                 f'<button type="submit">Approve again</button></form>')
-    return (f'<div class="row {code}"><div class="edge"></div><div class="in"><div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3>{esc(name)}</h3></div>'
+                 f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(owner)}" autocomplete="off"></label>'
+                 f'<button type="submit">Approve{" again" if bot["status"] == "revoked" else " anyway"}</button></form>')
+    return (f'<div class="row {code}"><div class="edge"></div><div class="in"><div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3><a href="/panel/{esc(bot["bot_id"])}">{esc(name)}</a></h3></div>'
             f'<span class="status"><span class="dot"></span>{esc(label)}</span></div><div class="head">{"".join(meta)}</div>{forms}</div></div>')
 
 
 def approvals_tab(store, role, csrf, now):
     pending, approved, revoked = store.with_status("pending"), store.with_status("approved"), store.with_status("revoked")
+    denied = store.with_status("denied")
     out = ["<h2>Waiting for approval</h2>"]
     out += [staff_row(b, role, csrf, now) for b in pending] or ['<div class="empty">No bots are waiting. When a bot asks for a token it shows up here.</div>']
     out.append('<section><h2>Approve by ID</h2>')
@@ -627,6 +723,10 @@ def approvals_tab(store, role, csrf, now):
     if promos:
         out.append('<section><h2>Promo links</h2><p class="muted small">Bots with an invite link, ready to paste into the README or the server.</p>'
                    f'<textarea readonly rows="{min(len(promos), 12)}" aria-label="Promo links">{esc(chr(10).join(promos))}</textarea></section>')
+    if denied:
+        out.append(f'<section><h2>Denied ({len(denied)})</h2>')
+        out += [staff_row(b, role, csrf, now) for b in denied]
+        out.append("</section>")
     if revoked:
         out.append(f'<section><h2>Access removed ({len(revoked)})</h2>')
         out += [staff_row(b, role, csrf, now) for b in revoked]

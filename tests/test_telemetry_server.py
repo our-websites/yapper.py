@@ -89,6 +89,9 @@ class Case(unittest.TestCase):
         self.cfg.oauth = self.mock.oauth(f"http://127.0.0.1:{self.port}/auth/callback")
 
     # -- helpers --
+    def location(self, response):
+        return response[3].getheader("Location")
+
     def call(self, method, path, body=None, headers=None, raw=None, user=None):
         headers = dict(headers or {})
         if user:
@@ -547,15 +550,15 @@ class PanelViewTests(Case):
             self.assertNotIn('data-key-for="', text, user)
 
     def test_tabs_by_role(self):
-        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("boss")), ["approvals", "people", "activity", "team", "stats", "announce"])
-        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("man")), ["approvals", "people", "activity", "team", "stats", "announce"])
-        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("app")), ["approvals", "people", "activity"])
-        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("own1")), ["bots"])
+        self.assertEqual(re.findall(r'<a href="/panel/(approvals|bots|people|activity|team|stats|announce)"', self.view("boss")), ["approvals", "people", "activity", "team", "stats", "announce"])
+        self.assertEqual(re.findall(r'<a href="/panel/(approvals|bots|people|activity|team|stats|announce)"', self.view("man")), ["approvals", "people", "activity", "team", "stats", "announce"])
+        self.assertEqual(re.findall(r'<a href="/panel/(approvals|bots|people|activity|team|stats|announce)"', self.view("app")), ["approvals", "people", "activity"])
+        self.assertEqual(re.findall(r'<a href="/panel/(approvals|bots|people|activity|team|stats|announce)"', self.view("own1")), ["bots"])
 
     def test_staff_who_own_bots_get_an_extra_tab(self):
         self.store.approve("b9", "app", "boss", "Approver's Bot")
         text = self.view("app")
-        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', text), ["approvals", "bots", "people", "activity"])
+        self.assertEqual(re.findall(r'<a href="/panel/(approvals|bots|people|activity|team|stats|announce)"', text), ["approvals", "bots", "people", "activity"])
         self.assertIn("Approver&#x27;s Bot", self.view("app", "/panel/bots"))
         self.assertIn("Waiting for approval", self.view("app", "/panel/approvals"))   # can still approve others
 
@@ -1053,7 +1056,7 @@ class SharingPanelTests(Case):
 
     def test_staff_who_are_given_a_bot_get_the_my_bots_tab(self):
         self.store.share("own", "b1", "app", "viewer")
-        self.assertEqual(re.findall(r'<a href="/panel/(\w+)"', self.view("app")), ["approvals", "bots", "people", "activity"])
+        self.assertEqual(re.findall(r'<a href="/panel/(approvals|bots|people|activity|team|stats|announce)"', self.view("app")), ["approvals", "bots", "people", "activity"])
 
     def test_approvers_can_switch_the_owner_to_a_new_account(self):
         page = self.view("app", "/panel/approvals")
@@ -1082,9 +1085,6 @@ class PanelFeatureTests(Case):
             self.store.record_login(uid, name, "https://files.yapper.website/avatars/" + uid + ".png", display=name.upper())
         self.approve("b1", "own", "Promo Bot")
         self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot"}, "servers": {"count": 3}})
-
-    def location(self, response):
-        return response[3].getheader("Location")
 
     def test_landing_always_shows_with_a_panel_button_when_logged_in(self):
         out = self.call("GET", "/")[2]
@@ -1222,29 +1222,96 @@ class PanelFeatureTests(Case):
         with self.assertRaises(ValueError):
             self.store.create_api_key("own", "one more")
 
-    def test_invite_link_and_promo_line(self):
+    def test_invite_link_is_saved_by_owners_and_the_readme_link_is_for_staff_only(self):
         for bad in ("https://evil.example/invite/x", "http://www.yapin.gg/invite/x", "https://www.yapin.gg/invite/x y", "javascript:alert(1)"):
             self.assertIn("msg=invalid", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url=bad)), bad)
         self.assertIn("msg=invite_saved", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")))
-        page = self.view("own", "/panel/bots")
-        line = '&lt;a href=&quot;https://www.yapin.gg/invite/promo&quot;&gt;&lt;b&gt;Promo Bot&lt;/b&gt;&lt;/a&gt;'
-        self.assertIn(line, page)
-        self.assertIn(line, self.view("app", "/panel/approvals"))   # staff can copy it too
+        line = "[**Promo Bot**](https://www.yapin.gg/invite/promo)"
+        for page in (self.view("own", "/panel/bots"), self.view("own", "/bots/b1")):
+            self.assertIn("https://www.yapin.gg/invite/promo", page)                       # owners see and can change the link...
+            self.assertNotIn("**Promo Bot**", page)                                         # ...but not the Markdown
+            self.assertNotIn("README link", page)
+        self.assertIn(line, self.view("app", "/panel/approvals"))                           # staff get it in the approvals list
+        self.assertIn(line, self.view("app", "/panel/b1"))                                  # and on the bot's staff page
         self.assertIn("msg=denied", self.location(self.act("app", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
         self.store.share("own", "b1", "v1", "viewer")
         self.assertIn("msg=denied", self.location(self.act("v1", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
         self.act("own", "/panel/invite", bot_id="b1", invite_url="")
         self.assertIsNone(self.store.get_bot("b1")["invite_url"])
 
-    def test_promo_line_is_one_link_with_icon_and_name_and_escapes_everything(self):
-        bot = {"bot_id": "5e872d4a-1892-43ce-aaae-40ecd7acd768", "name": 'Sh"apes <x>', "invite_url": None,
+    def test_bot_data_page_and_who_can_open_it(self):
+        self.store.share("own", "b1", "v1", "viewer")
+        for user in ("own", "v1"):
+            r = self.call("GET", "/bots/b1", user=user)
+            self.assertEqual(r[0], 200, user)
+            self.assertIn("Promo Bot", r[2])
+            self.assertIn('data-live="/bots/b1/live"', r[2])                                # polling is on
+        self.assertIn("Private key", self.view("own", "/bots/b1"))
+        self.assertNotIn("Private key", self.view("v1", "/bots/b1"))                        # viewers never get the key
+        for user in ("app", "man", "boss"):                                                 # the team doesn't get bots' data
+            r = self.call("GET", "/bots/b1", user=user)
+            self.assertEqual((r[0], r[3].getheader("Location")), (303, "/panel/b1"), user)
+        stranger = self.call("GET", "/bots/b1", user="viewer-less")
+        self.assertEqual((stranger[0], stranger[3].getheader("Location")), (303, "/panel/bots?msg=denied"))
+        self.assertEqual(self.call("GET", "/bots/b1")[3].getheader("Location"), "/?msg=login_needed")
+        self.assertEqual(self.call("GET", "/bots/b1/extra/more", user="own")[0], 404)
+        self.assertEqual(self.call("GET", "/bots/b1/data", user="own")[0], 404)
+        self.assertEqual(self.call("GET", "/bots/bad%20id", user="own")[0], 404)
+        self.assertIn('href="/bots/b1"', self.view("own", "/panel/bots"))                    # the list links to it
+
+    def test_bot_data_page_refreshes_with_the_live_fragment(self):
+        live = self.call("GET", "/bots/b1/live", user="own")
+        self.assertEqual(live[0], 200)
+        self.assertTrue(live[2].startswith('<div class="live"'))
+        self.assertNotIn("<html", live[2])
+        self.assertNotIn("Private key", live[2])                                             # forms and the key stay out of what is swapped in
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot"}, "servers": {"count": 99}})
+        self.assertIn("<dd>99</dd>", self.call("GET", "/bots/b1/live", user="own")[2])
+        self.assertEqual(self.call("GET", "/bots/b1/live", user="v1")[0], 404)               # not shared: no data, no redirect
+        self.assertEqual(self.call("GET", "/bots/b1/live", user="app")[0], 404)
+        self.assertEqual(self.call("GET", "/bots/b1/live")[0], 303)
+        self.assertIn("setTimeout(refresh", panel.JS)
+        self.assertIn("document.hidden", panel.JS)                                           # no polling in a hidden tab
+
+    def test_staff_bot_page_has_no_data_and_views_are_logged(self):
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot"}, "servers": {"count": 3}, "commands": [{"name": "SECRET-COMMAND-TEXT"}]})
+        text = self.view("app", "/panel/b1")
+        self.assertIn("Promo Bot", text)
+        self.assertNotIn("SECRET-COMMAND-TEXT", text)
+        self.assertNotIn("Latest report", text)
+        self.assertNotIn('data-key-for="', text)
+        self.assertIn("viewed", self.view("boss", "/panel/activity"))                        # managers and owners see who looked at which bot
+        self.assertNotIn("viewed", self.view("app", "/panel/activity"))                      # approvers don't get the manager level
+        self.assertEqual(self.call("GET", "/panel/nope", user="app")[0], 200)                # not a bot: the first tab
+
+    def test_version_facts_are_sdk_and_pypi_only(self):
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1"}, "sdk": {"version": "1.2.3", "package_version": "1.2.0", "yapin_version": "9.9.9"}})
+        page = self.view("own", "/bots/b1")
+        self.assertIn("SDK version (main.py)", page)
+        self.assertIn("<dd>1.2.3</dd>", page)
+        self.assertIn("PyPI version", page)
+        self.assertIn("<dd>1.2.0</dd>", page)
+        self.assertNotIn("<dd>9.9.9</dd>", page)
+
+    def test_bot_pictures_from_paths(self):
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot", "avatar": "abc/pic 1.png"}})
+        self.assertEqual(self.store.get_bot("b1")["avatar"], "https://files.yapper.website/avatars/abc/pic%201.png")
+        self.assertIn('src="https://files.yapper.website/avatars/abc/pic%201.png"', self.view("own", "/bots/b1"))
+        self.assertIn('src="https://files.yapper.website/avatars/abc/pic%201.png"', self.view("app", "/panel/b1"))
+        for bad in ("../../etc/passwd", "javascript:alert(1)", "//evil.example/x.png", "a" * 400, 5, ""):
+            self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "avatar": bad}})
+            self.assertEqual(self.store.get_bot("b1")["avatar"], "https://files.yapper.website/avatars/abc/pic%201.png", repr(bad))   # kept the good one
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "avatar": "/uploads/a.png"}})
+        self.assertEqual(self.store.get_bot("b1")["avatar"], "https://www.yapin.gg/uploads/a.png")
+
+    def test_promo_line_is_markdown_with_icon_and_name_and_escapes_everything(self):
+        bot = {"bot_id": "5e872d4a-1892-43ce-aaae-40ecd7acd768", "name": 'Sh"a[p]es <x> *_`', "invite_url": None,
                "avatar": "https://files.yapper.website/avatars/a.png"}
-        line = panel.promo_line(bot)
-        self.assertEqual(line, '<a href="https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768">'
-                               '<img src="https://files.yapper.website/avatars/a.png" width="24" height="24" alt="" align="absmiddle"> '
-                               '<b>Sh&quot;apes &lt;x&gt;</b></a>')    # made from the bot's Yapin' ID, like shapes-bot's /add
+        self.assertEqual(panel.promo_line(bot), '[<img src="https://files.yapper.website/avatars/a.png" width="24" height="24" align="absmiddle"> '
+                                                '**Sh"a\\[p\\]es \\<x\\> \\*\\_\\`**](https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)')
         self.assertEqual(panel.promo_line(dict(bot, bot_id="12345")), "")                    # not a Yapin' bot ID: needs a saved link
-        self.assertIn("https://www.yapin.gg/invite/own", panel.promo_line(dict(bot, invite_url="https://www.yapin.gg/invite/own")))
+        self.assertEqual(panel.promo_line(dict(bot, name="Plain", avatar=None, invite_url="https://www.yapin.gg/invite/own")),
+                         "[**Plain**](https://www.yapin.gg/invite/own)")
         self.assertNotIn("<img", panel.promo_line(dict(bot, avatar="http://tracker.example/x.png")))
 
     def test_pictures_only_come_from_trusted_hosts(self):
@@ -1275,6 +1342,77 @@ class PanelFeatureTests(Case):
         self.assertTrue(any(a["title"] == "Hello" for a in self.store.unread_for("own")))
         self.assertIn("announcement left for v1", S.run_command(self.store, "announce Viewy Psst | Just you"))
         self.assertIn("announce.send", S.run_command(self.store, "activity"))
+
+
+class DenyTests(Case):
+    """Staff can say no to a waiting bot, with a reason the owner sees."""
+
+    def setUp(self):
+        super().setUp()
+        self.store.set_role("boss", "app", "approver")
+        self.store.set_role("boss", "man", "manager")
+        self.store.record_login("own", "Owny", None)
+        self.store.apply("own", "pend1")
+        self.store.see_bot("pend1", "Pending Bot")
+
+    def test_a_reason_is_required(self):
+        for reason in ("", "   ", "no", "x" * 4):
+            self.assertIn("msg=reason_needed", self.location(self.act("app", "/panel/deny", bot_id="pend1", reason=reason)), repr(reason))
+            self.assertEqual(self.store.get_bot("pend1")["status"], "pending")
+        with self.assertRaises(S.ReasonRequired):
+            self.store.deny("pend1", "app", "")
+
+    def test_deny_with_a_reason_and_the_owner_sees_it(self):
+        self.assertIn("msg=bot_denied", self.location(self.act("app", "/panel/deny", bot_id="pend1", reason="  Not   built on yapper.py  ")))
+        bot = self.store.get_bot("pend1")
+        self.assertEqual((bot["status"], bot["deny_reason"], bot["denied_by"]), ("denied", "Not built on yapper.py", "app"))
+        page = self.view("own", "/panel/bots")
+        self.assertIn("Denied", page)
+        self.assertIn("Not built on yapper.py", page)
+        self.assertNotIn('data-key-for="', page)
+        self.assertIn("Not built on yapper.py", self.view("app", "/panel/approvals"))
+        self.assertIn("denied", self.view("app", "/panel/activity"))
+        self.assertEqual(self.store.counts()["denied"], 1)
+        self.assertEqual(self.store.with_status("pending"), [])
+
+    def test_the_bot_is_told_why(self):
+        self.act("app", "/panel/deny", bot_id="pend1", reason="Please add proof that yapper.py is your main SDK")
+        r = self.call("POST", "/", {"bot_id": "pend1"})
+        self.assertEqual(r[0], 403)
+        self.assertEqual((r[1]["error"], r[1]["status"]), ("denied", "denied"))
+        self.assertIn("Please add proof that yapper.py is your main SDK", r[1]["message"])
+        self.assertEqual(self.store.get_bot("pend1")["status"], "denied")                       # asking again doesn't bring it back
+
+    def test_only_waiting_bots_can_be_denied_and_only_by_staff_who_can_approve(self):
+        self.approve("b1", "own")
+        self.assertIn("msg=invalid", self.location(self.act("app", "/panel/deny", bot_id="b1", reason="Changed my mind")))
+        self.assertEqual(self.store.get_bot("b1")["status"], "approved")
+        self.assertIn("msg=invalid", self.location(self.act("app", "/panel/deny", bot_id="nobody", reason="Changed my mind")))
+        for user in ("own", "v1"):
+            self.assertIn("msg=denied", self.location(self.act(user, "/panel/deny", bot_id="pend1", reason="Because I said so")), user)
+        self.assertEqual(self.store.get_bot("pend1")["status"], "pending")
+        self.assertIn("msg=bot_denied", self.location(self.act("man", "/panel/deny", bot_id="pend1", reason="Because I said so")))
+
+    def test_denied_bots_can_be_approved_later_and_cannot_be_applied_for_again(self):
+        self.act("app", "/panel/deny", bot_id="pend1", reason="Missing proof of the SDK")
+        with self.assertRaises(ValueError) as ctx:
+            self.store.apply("own", "pend1")
+        self.assertIn("Missing proof of the SDK", str(ctx.exception))
+        self.assertIn("Approve anyway", self.view("app", "/panel/approvals"))
+        self.assertIn("msg=approved", self.location(self.act("app", "/panel/approve", bot_id="pend1", owner_id="own")))
+        bot = self.store.get_bot("pend1")
+        self.assertEqual((bot["status"], bot["owner_id"], bot["deny_reason"]), ("approved", "own", None))
+
+    def test_deny_is_logged_and_on_the_console(self):
+        self.act("app", "/panel/deny", bot_id="pend1", reason="Missing proof of the SDK")
+        self.assertIn(("bot.deny", "app"), [(e["kind"], e["actor"]) for e in self.store.read_audit(bot_id="pend1")])
+        self.store.see_bot("pend2", "Second")
+        self.assertIn("denied pend2", S.run_command(self.store, "deny pend2 Spam bot, not on the SDK"))
+        self.assertEqual(self.store.get_bot("pend2")["deny_reason"], "Spam bot, not on the SDK")
+        self.assertEqual(self.store.get_bot("pend1")["status"], "denied")
+        self.assertNotIn("denied pend1", S.run_command(self.store, "deny pend1"))               # no reason: it isn't done again or silently
+        self.assertIn("pend2", S.run_command(self.store, "list denied"))
+        self.assertIn("2 denied", S.run_command(self.store, "status"))
 
 
 class ConsoleTests(unittest.TestCase):
@@ -1401,6 +1539,101 @@ class FilesTests(unittest.TestCase):
     def test_example_report_is_valid_json_and_in_the_landing_page(self):
         json.dumps(panel.EXAMPLE_REPORT)
         self.assertEqual(panel.EXAMPLE_REPORT["schema"], 1)
+
+
+class SupportLinkTests(Case):
+    def setUp(self):
+        super().setUp()
+        self.approve("b1", "own1", name="Dice")
+
+    def test_owner_saves_and_clears_a_support_link(self):
+        self.assertIn("msg=support_saved", self.location(self.act("own1", "/panel/support", bot_id="b1", support_url="https://www.yapin.gg/invite/dicehelp")))
+        self.assertEqual(self.store.get_bot("b1")["support_url"], "https://www.yapin.gg/invite/dicehelp")
+        self.assertIn('href="https://www.yapin.gg/invite/dicehelp"', self.view("own1", "/bots/b1"))
+        self.act("own1", "/panel/support", bot_id="b1", support_url="")
+        self.assertIsNone(self.store.get_bot("b1")["support_url"])
+
+    def test_only_yapin_invites_and_only_the_owner(self):
+        for bad in ("https://evil.test/invite/x", "javascript:alert(1)", "http://www.yapin.gg/invite/x", "https://www.yapin.gg/bot/abc"):
+            self.assertIn("msg=invalid", self.location(self.act("own1", "/panel/support", bot_id="b1", support_url=bad)), bad)
+        with self.assertRaises(PermissionError):
+            self.store.set_support("stranger", "b1", "https://www.yapin.gg/invite/dicehelp")
+
+    def test_description_is_stored_cleaned_and_escaped(self):
+        tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
+        self.report(tok, bot={"id": "b1", "username": "Dice", "description": "Rolls <script>x</script>\n dice"})
+        self.assertEqual(self.store.get_bot("b1")["description"], "Rolls <script>x</script> dice")
+        page = self.view("own1", "/bots/b1")
+        self.assertIn("Rolls &lt;script&gt;x&lt;/script&gt; dice", page)
+        self.assertNotIn("<script>x", page)
+
+
+class BadgeTests(Case):
+    """Live SVG badges for READMEs."""
+
+    def setUp(self):
+        super().setUp()
+        self.fetched = []
+        self.cfg.fetch_image = lambda url, hosts: (self.fetched.append((url, set(hosts))), "data:image/png;base64,AAAA")[1]
+        self.approve("b1", "own1", name="<b>Dice</b> & Co")
+        self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
+        tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
+        self.report(tok, bot={"id": "b1", "username": "<b>Dice</b> & Co", "avatar": "avatar/a.png"})
+
+    def test_stats_badge_is_public_svg(self):
+        status, _, text, resp = self.call("GET", "/badge/stats.svg")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "image/svg+xml")
+        self.assertIn("<svg", text)
+        self.assertIn("default-src 'none'", resp.getheader("Content-Security-Policy"))
+        self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+
+    def test_featured_badge_lists_approved_bots_only(self):
+        self.store.record_login("own2", "Two", None)
+        self.store.apply("own2", "pending1")
+        self.store.see_bot("pending1", "Waiting Bot")
+        self.store.set_invite("own1", "b1", "")          # shown even without an invite link
+        status, _, text, resp = self.call("GET", "/badge/featured.svg")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "image/svg+xml")
+        self.assertIn("&lt;b&gt;Dice&lt;/b&gt;", text)
+        self.assertNotIn("Waiting Bot", text)
+        self.assertNotIn("<b>Dice", text)
+        self.assertIn("3 servers", text)
+
+    def test_featured_badge_with_no_bots(self):
+        self.assertIn("No approved bots yet", __import__("telemetry_badge").featured_badge([]).decode())
+
+    def test_bot_badge_escapes_the_name(self):
+        status, _, text, _ = self.call("GET", "/badge/b1.svg")
+        self.assertEqual(status, 200)
+        self.assertNotIn("<b>", text)
+        self.assertIn("&lt;b&gt;Dice", text)
+
+    def test_bot_badge_needs_approval_and_an_invite(self):
+        self.store.set_invite("own1", "b1", "")
+        self.assertEqual(self.call("GET", "/badge/b1.svg")[0], 404)
+        self.assertEqual(self.call("GET", "/badge/nobody.svg")[0], 404)
+        self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
+        self.store.record_login("own2", "Two", None)
+        self.store.apply("own2", "p1")
+        self.assertEqual(self.call("GET", "/badge/p1.svg")[0], 404)
+
+    def test_staff_page_offers_the_live_badge_markdown(self):
+        self.store.set_role("boss", "app", "approver")
+        page = self.view("app", "/panel/b1")
+        self.assertIn(f"/badge/b1.svg)](https://www.yapin.gg/invite/dice)", page)
+        self.assertNotIn("<b>Dice", page)
+
+    def test_icon_is_only_fetched_from_allowed_hosts(self):
+        self.call("GET", "/badge/b1.svg")
+        for _, hosts in self.fetched:
+            self.assertEqual(hosts, self.cfg.oauth.image_hosts() | self.cfg.extra_image_hosts)
+
+    def test_fetch_image_rejects_other_hosts_and_schemes(self):
+        from telemetry_badge import fetch_image
+        for url in ("http://www.yapin.gg/a.png", "https://evil.test/a.png", "https://www.yapin.gg@evil.test/a.png", "", None):
+            self.assertIsNone(fetch_image(url, {"www.yapin.gg"}), url)
 
 
 if __name__ == "__main__":

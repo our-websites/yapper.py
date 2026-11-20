@@ -128,7 +128,7 @@ telemetry.enable(bot)   # or: bot.load_extension("yapper.telemetry")
 
 Once the bot is online, and then every 30 minutes, it sends this as JSON:
 
-- the bot's ID and username
+- the bot's ID, username, profile picture link and description (its bio, read from its own Yapin' profile, at most 300 characters)
 - command names, descriptions and options, cog and extension names, and how many listeners and buttons it has
 - how many servers the bot is in and their total member (and online) count, just the numbers
 - the yapper version, the Python version and the OS name
@@ -166,14 +166,18 @@ versions), so we know what to improve and which versions still need support. It 
 and we choose from the approved bots using the details listed above. If you do not turn it on, nothing is sent and nothing
 changes for you.
 
+### The telemetry page
+
+Bot owners log in with Yapin' at **<https://yapper-py.rustdactyl.tech>** to follow their bot's status, see what it reports, and
+save its invite and support links. The page also draws live badges that update themselves, so nothing here needs editing:
+
+![bots using yapper.py telemetry](https://yapper-py.rustdactyl.tech/badge/stats.svg)
+
 ### Featured bots
 
 Bots built on yapper.py that opted in to telemetry and were picked by us:
 
-- <a href="https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768"><b>Shapes</b></a>
-
-Want yours here? Add its yapin.gg invite link on your bot's page in the telemetry panel (**My bots**, then **Invite link**):
-the panel gives you a ready-to-paste link with your bot's icon and name; pressing it opens your bot so people can add it.
+@@FEATURED@@
 
 Running the receiving end yourself? The server and its setup guide are in [`server/`](server/README.md).
 

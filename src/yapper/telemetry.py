@@ -6,7 +6,7 @@ load it yourself, so a normal install sends nothing, ever.
 
 Once on, it sends a small JSON report (see `collect()`) when the bot comes online and then every 30 minutes: bot id and
 name, command names/descriptions/options, cog and extension names, how many listeners and buttons it has, how many
-servers it is in and their total member count, the bot's profile picture link, the yapper version, the Python version and
+servers it is in and their total member count, the bot's profile picture link and description (its bio), the yapper version, the Python version and
 the OS name, plus any extra values you add yourself with `add_data(bot, name, value)`. It never sends
 the bot token, message content, user, server or channel names or ids, or anything else.
 
@@ -22,12 +22,10 @@ See exactly what would be sent with `telemetry.preview(bot)`. Turn it off by rem
 This file is self-contained (standard library only), so it also works next to the single-file yapper.py download:
 `import telemetry; telemetry.enable(bot)`.
 """
-import importlib.util
 import json
 import os
 import platform
 import random
-import re
 import sys
 import threading
 import time
@@ -87,6 +85,52 @@ def _sdk_version(bot):
     return getattr(sys.modules.get(type(bot).__module__), "__version__", None)
 
 
+MAX_DESCRIPTION = 300
+_DESC_KEYS = ("bio",)
+_desc_cache = {}
+
+
+def _pick_description(*sources):
+    """The first non-empty bio text in these dicts (or in their nested "user"), cleaned and shortened; None if there is none."""
+    for src in sources:
+        for d in (src, src.get("user") if isinstance(src, dict) else None):
+            if not isinstance(d, dict):
+                continue
+            for key in _DESC_KEYS:
+                value = d.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = " ".join("".join(c if c >= " " and c != "\x7f" else " " for c in value).split())
+                    return text[:MAX_DESCRIPTION]
+    return None
+
+
+def _description(bot, me, ttl=3600):
+    """The bot's own description (its bio). shapes-bot reads people's bios from the full user profile (bot.user(id): bio), so that is tried after `me`, and last the bot's member info in a server it is in (a bot is always a member of its
+    servers). Looked up at most once an hour; any failure just means no description."""
+    key, now = id(bot), time.time()
+    hit = _desc_cache.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
+    text = _pick_description(me)
+    if text is None and me.get("id"):
+        try:
+            text = _pick_description(dict(bot.user(me["id"])))
+        except Exception:
+            text = None
+    if text is None:
+        try:
+            for server in list(bot.servers())[:3]:
+                sid = server.get("id") if isinstance(server, dict) else getattr(server, "id", None)
+                if sid and me.get("id"):
+                    text = _pick_description(dict(bot.member(sid, me["id"])))
+                    if text:
+                        break
+        except Exception:
+            text = None
+    _desc_cache[key] = (now + ttl, text)
+    return text
+
+
 def _servers(bot):
     """(count, total members, total online) over every server the bot is in, or None when the lookup fails."""
     try:
@@ -98,29 +142,9 @@ def _servers(bot):
     return {"count": len(servers), "members_total": members, "online_total": sum(int(o) for o in online) if online else None}
 
 
-_VERSION_LINE = re.compile(r"""^__version__\s*(?::[^=]+)?=\s*["']([^"']{1,32})["']""", re.M)
-
-
-def _sdk_file_version(bot):
-    """The __version__ written in the SDK file itself (main.py in the installed package, or the single-file download),
-    read from disk without importing anything. This is the Yapin' SDK version; the PyPI version below may differ."""
-    try:
-        module = sys.modules.get(type(bot).__module__)
-        path = getattr(module, "__file__", None)
-        if not path:
-            spec = importlib.util.find_spec("yapper.main")
-            path = spec.origin if spec else None
-        if path and os.path.isfile(path):
-            with open(path, encoding="utf-8", errors="replace") as f:
-                found = _VERSION_LINE.search(f.read(200_000))
-            return found.group(1) if found else None
-    except Exception:
-        pass
-    return None
-
-
 def _sdk_info(bot):
-    return {"version": _sdk_version(bot), "package_version": _dist_version("yapper.py"), "yapin_version": _sdk_file_version(bot)}
+    """version: the SDK's own version (the __version__ in main.py, or in the single-file download). package_version: the PyPI package's."""
+    return {"version": _sdk_version(bot), "package_version": _dist_version("yapper.py")}
 
 
 MAX_EXTRA_KEYS = 50
@@ -164,12 +188,29 @@ def _extra(bot):
     return out
 
 
+ASSET_SITE = "https://www.yapin.gg"
+ASSET_FILES = "https://files.yapper.website"
+
+
 def _avatar(me):
-    """The bot's profile picture link, when the API gives one (public https links only)."""
-    for key in ("avatar_url", "avatar"):
-        url = me.get(key)
-        if isinstance(url, str) and url.startswith("https://") and len(url) <= 300:
-            return url
+    """The bot's profile picture as an https link. Yapin' gives pictures as a path (avatar_path / avatar), which lives under
+    files.yapper.website/avatars/, or on www.yapin.gg when it starts with a slash; full https links are kept as they are."""
+    for key in ("avatar_url", "avatar_path", "avatar"):
+        value = me.get(key)
+        if not isinstance(value, str) or not value.strip() or len(value) > 300 or value.strip().startswith(("javascript:", "data:", "http://")):
+            continue
+        value = value.strip()
+        if value.startswith("//"):
+            value = "https:" + value
+        if value.startswith("https://"):
+            url = value
+        elif ":" in value.split("/", 1)[0]:
+            continue
+        elif value.startswith("/"):
+            url = ASSET_SITE + value
+        else:
+            url = f"{ASSET_FILES}/avatars/{value}"
+        return url.replace(" ", "%20")
     return None
 
 
@@ -189,7 +230,7 @@ def collect(bot, event="report", started=None):
         "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sdk": _sdk_info(bot),
         "runtime": {"python": platform.python_version(), "os": platform.system()},
-        "bot": {"id": me.get("id"), "username": me.get("username"), "avatar": _avatar(me),
+        "bot": {"id": me.get("id"), "username": me.get("username"), "avatar": _avatar(me), "description": _description(bot, me),
                 "uptime_seconds": int(time.time() - started) if started else None},
         "servers": _servers(bot),
         "commands": commands,

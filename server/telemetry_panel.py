@@ -20,7 +20,7 @@ EXAMPLE_REPORT = {
     "sent_at": "2026-03-14T18:30:12+00:00",
     "sdk": {"version": "1.8.4", "package_version": "1.8.4"},
     "runtime": {"python": "3.12.3", "os": "Linux"},
-    "bot": {"id": "123456789", "username": "Cool Bot", "avatar": "https://cdn.example/avatars/123456789.png", "uptime_seconds": 86412},
+    "bot": {"id": "123456789", "username": "Cool Bot", "avatar": "https://cdn.example/avatars/123456789.png", "description": "Rolls dice for your server.", "uptime_seconds": 86412},
     "servers": {"count": 14, "members_total": 2310, "online_total": 412},
     "commands": [
         {"name": "ping", "description": "Check if the bot is alive", "options": []},
@@ -43,6 +43,7 @@ MESSAGES = {
     "ambiguous": ("bad", "More than one person has that username. Use their user ID."),
     "announced": ("ok", "Announcement sent. It waits for anyone who is offline until they next open the page."),
     "saved": ("ok", "Saved."),
+    "support_saved": ("ok", "Support server link saved."),
     "invite_saved": ("ok", "Invite link saved. Copy the promo link from the bot\'s Invite link section."),
     "key_removed": ("ok", "API key removed. It stops working right away."),
     "login_needed": ("bad", "Log in to open the panel."),
@@ -481,7 +482,7 @@ def growth(bot):
 
 EVENT_TEXT = {
     "bot.approve": "approved", "bot.deny": "denied", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
-    "bot.invite": "set the invite link of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
+    "bot.invite": "set the invite link of", "bot.support": "set the support server of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
     "key.rotate": "made a new private key for", "role.add": "gave a role to", "role.remove": "removed the role of", "announce.send": "sent an announcement to",
     "page.view": "opened the", "apikey.create": "made an API key", "apikey.remove": "removed an API key", "api.read": "read data through the API for",
     "settings.timezone": "changed their timezone to",
@@ -530,6 +531,10 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
     title = f'<a href="/bots/{esc(bot["bot_id"])}">{esc(name)}</a>' if link and bot["status"] == "approved" else esc(name)
     parts = [f'<div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3>{title}</h3></div><span class="status"><span class="dot"></span>{esc(label)}</span></div>',
              f'<div class="id">{esc(bot["bot_id"])}</div>']
+    if bot.get("description") and code not in ("pending", "denied", "removed"):
+        parts.append(f'<p class="desc">{esc(bot["description"])}</p>')
+    if bot.get("support_url") and code not in ("pending", "denied", "removed"):
+        parts.append(f'<p class="small"><a href="{esc(bot["support_url"])}" rel="noopener">Support server</a></p>')
     if level != "owner" and code not in ("pending", "denied"):
         parts.append(f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
     if code == "pending":
@@ -638,6 +643,10 @@ def invite_section(bot, csrf):
             '<p class="muted small">Add your bot\'s yapin.gg link (https://yapin.gg/bot/...) so people can add it from lists the team features.</p>'
     return (f'<details><summary>Invite link</summary>{shown}<form class="inline" method="post" action="/panel/invite">{hidden}'
             f'<label>yapin.gg invite link<input name="invite_url" value="{esc(bot.get("invite_url"))}" placeholder="https://www.yapin.gg/invite/yourbot" autocomplete="off"></label>'
+            f'<button type="submit">Save</button></form></details>'
+            f'<details><summary>Support server</summary><p class="muted small">Shown on your bot\'s page so people can get help. Your bot\'s description is read from its own profile; change it in your bot (set_profile).</p>'
+            f'<form class="inline" method="post" action="/panel/support">{hidden}'
+            f'<label>yapin.gg invite link<input name="support_url" value="{esc(bot.get("support_url"))}" placeholder="https://www.yapin.gg/invite/yourserver" autocomplete="off"></label>'
             f'<button type="submit">Save</button></form></details>')
 
 

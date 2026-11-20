@@ -6,7 +6,7 @@ load it yourself, so a normal install sends nothing, ever.
 
 Once on, it sends a small JSON report (see `collect()`) when the bot comes online and then every 30 minutes: bot id and
 name, command names/descriptions/options, cog and extension names, how many listeners and buttons it has, how many
-servers it is in and their total member count, the bot's profile picture link, the yapper version, the Python version and
+servers it is in and their total member count, the bot's profile picture link and description (its bio), the yapper version, the Python version and
 the OS name, plus any extra values you add yourself with `add_data(bot, name, value)`. It never sends
 the bot token, message content, user, server or channel names or ids, or anything else.
 
@@ -83,6 +83,47 @@ def _dist_version(name):
 def _sdk_version(bot):
     """The version of the SDK file the bot class came from: works for the package and for the loose single file."""
     return getattr(sys.modules.get(type(bot).__module__), "__version__", None)
+
+
+MAX_DESCRIPTION = 300
+_DESC_KEYS = ("bio", "description", "about", "about_me")
+_desc_cache = {}
+
+
+def _pick_description(*sources):
+    """The first non-empty bio/description text in these dicts (or in their nested "user"), cleaned and shortened; None if there is none."""
+    for src in sources:
+        for d in (src, src.get("user") if isinstance(src, dict) else None):
+            if not isinstance(d, dict):
+                continue
+            for key in _DESC_KEYS:
+                value = d.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = " ".join("".join(c if c >= " " and c != "\x7f" else " " for c in value).split())
+                    return text[:MAX_DESCRIPTION]
+    return None
+
+
+def _description(bot, me, ttl=3600):
+    """The bot's own description. It is on the bot's profile (`me`), and failing that on its member info in a server it is in (a bot
+    is always a member of the servers it is in). Looked up at most once an hour; any failure just means no description."""
+    key, now = id(bot), time.time()
+    hit = _desc_cache.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
+    text = _pick_description(me)
+    if text is None:
+        try:
+            for server in list(bot.servers())[:3]:
+                sid = server.get("id") if isinstance(server, dict) else getattr(server, "id", None)
+                if sid and me.get("id"):
+                    text = _pick_description(dict(bot.member(sid, me["id"])))
+                    if text:
+                        break
+        except Exception:
+            text = None
+    _desc_cache[key] = (now + ttl, text)
+    return text
 
 
 def _servers(bot):
@@ -184,7 +225,7 @@ def collect(bot, event="report", started=None):
         "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sdk": _sdk_info(bot),
         "runtime": {"python": platform.python_version(), "os": platform.system()},
-        "bot": {"id": me.get("id"), "username": me.get("username"), "avatar": _avatar(me),
+        "bot": {"id": me.get("id"), "username": me.get("username"), "avatar": _avatar(me), "description": _description(bot, me),
                 "uptime_seconds": int(time.time() - started) if started else None},
         "servers": _servers(bot),
         "commands": commands,

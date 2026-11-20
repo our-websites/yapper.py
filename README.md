@@ -128,7 +128,7 @@ telemetry.enable(bot)   # or: bot.load_extension("yapper.telemetry")
 
 Once the bot is online, and then every 30 minutes, it sends this as JSON:
 
-- the bot's ID and username
+- the bot's ID, username, profile picture link and description (its bio, read from its own profile, at most 300 characters)
 - command names, descriptions and options, cog and extension names, and how many listeners and buttons it has
 - how many servers the bot is in and their total member (and online) count, just the numbers
 - the yapper version, the Python version and the OS name

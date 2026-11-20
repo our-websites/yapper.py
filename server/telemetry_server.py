@@ -420,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.strip("/").split("/")[1:]       # after "api"
         bots = {b["bot_id"]: b for b in self.store.api_bots(user_id)}
         if parts == ["bots"]:
-            return self.reply(200, {"bots": [{"bot_id": b["bot_id"], "name": b["name"], "owner_id": b["owner_id"], "last_report_at": b["last_report_at"], "invite_url": b.get("invite_url"),
+            return self.reply(200, {"bots": [{"bot_id": b["bot_id"], "name": b["name"], "owner_id": b["owner_id"], "last_report_at": b["last_report_at"], "invite_url": b.get("invite_url"), "support_url": b.get("support_url"), "description": b.get("description"),
                                               "sdk_version": b["sdk_version"], "package_version": b["package_version"]} for b in bots.values()]})
         bot = bots.get(parts[1]) if len(parts) >= 2 and parts[0] == "bots" else None
         if not bot or len(parts) > 3:
@@ -511,6 +511,11 @@ class Handler(BaseHTTPRequestHandler):
                 store.set_invite(me, bot_id, form.get("invite_url", ""))
                 store.audit(me, "bot.invite", "approver", bot_id, None, form.get("invite_url") or "cleared")
                 ok = "invite_saved"
+            elif path == "/panel/support":
+                tab = "bots"
+                store.set_support(me, bot_id, form.get("support_url", ""))
+                store.audit(me, "bot.support", "approver", bot_id, None, form.get("support_url") or "cleared")
+                ok = "support_saved"
             elif path == "/panel/rotate-key":
                 tab = "bots"
                 store.rotate_key(bot_id, me)

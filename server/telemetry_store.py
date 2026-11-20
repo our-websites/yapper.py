@@ -47,6 +47,14 @@ def clean_avatar(value):
     return None
 
 
+def clean_description(value, limit=300):
+    """A bot's own description as one line of plain text, or None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(c if c >= " " and c != "\x7f" else " " for c in value).split())
+    return text[:limit] or None
+
+
 INVITE = re.compile(r"^https://(?:www\.)?yapin\.gg/(?:invite|i|bot)/[A-Za-z0-9_-]{2,64}$")
 
 
@@ -125,7 +133,7 @@ class UserLookupError(ValueError):
 def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
-           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None,
+           "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None, "support_url": None, "description": None,
            "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None}
     bot.update(fields)
     return bot
@@ -536,7 +544,7 @@ class Store:
             count = (report.get("servers") or {}).get("count") if isinstance(report.get("servers"), dict) else None
             bot.update(servers=count if isinstance(count, int) and not isinstance(count, bool) and 0 <= count < 10 ** 9 else bot.get("servers"),
                        last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
-                       avatar=avatar or bot.get("avatar"),
+                       avatar=avatar or bot.get("avatar"), description=clean_description(info.get("description")) or bot.get("description"),
                        sdk_version=str(sdk.get("version") or "")[:32] or bot["sdk_version"],
                        package_version=str(sdk.get("package_version") or "")[:32] or bot["package_version"])
             self._put(bot, members, urgent=False)
@@ -610,6 +618,18 @@ class Store:
                 raise PermissionError("That is not your bot.")
             bot, members = self._read(bot_id)
             bot["invite_url"] = url or None
+            self._put(bot, members)
+
+    def set_support(self, user_id, bot_id, url):
+        """The bot's support server link (a yapin.gg invite). Only its owner or a manager they added; empty clears it."""
+        url = str(url or "").strip()
+        if url and (not valid_invite(url) or "/bot/" in url):
+            raise ValueError("That must be a https://www.yapin.gg/invite/... link to your support server.")
+        with self._lock:
+            if self.access_level(bot_id, user_id) not in ("owner", "manager"):
+                raise PermissionError("That is not your bot.")
+            bot, members = self._read(bot_id)
+            bot["support_url"] = url or None
             self._put(bot, members)
 
     def with_status(self, status):

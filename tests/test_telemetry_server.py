@@ -1541,6 +1541,33 @@ class FilesTests(unittest.TestCase):
         self.assertEqual(panel.EXAMPLE_REPORT["schema"], 1)
 
 
+class SupportLinkTests(Case):
+    def setUp(self):
+        super().setUp()
+        self.approve("b1", "own1", name="Dice")
+
+    def test_owner_saves_and_clears_a_support_link(self):
+        self.assertIn("msg=support_saved", self.location(self.act("own1", "/panel/support", bot_id="b1", support_url="https://www.yapin.gg/invite/dicehelp")))
+        self.assertEqual(self.store.get_bot("b1")["support_url"], "https://www.yapin.gg/invite/dicehelp")
+        self.assertIn('href="https://www.yapin.gg/invite/dicehelp"', self.view("own1", "/bots/b1"))
+        self.act("own1", "/panel/support", bot_id="b1", support_url="")
+        self.assertIsNone(self.store.get_bot("b1")["support_url"])
+
+    def test_only_yapin_invites_and_only_the_owner(self):
+        for bad in ("https://evil.test/invite/x", "javascript:alert(1)", "http://www.yapin.gg/invite/x", "https://www.yapin.gg/bot/abc"):
+            self.assertIn("msg=invalid", self.location(self.act("own1", "/panel/support", bot_id="b1", support_url=bad)), bad)
+        with self.assertRaises(PermissionError):
+            self.store.set_support("stranger", "b1", "https://www.yapin.gg/invite/dicehelp")
+
+    def test_description_is_stored_cleaned_and_escaped(self):
+        tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
+        self.report(tok, bot={"id": "b1", "username": "Dice", "description": "Rolls <script>x</script>\n dice"})
+        self.assertEqual(self.store.get_bot("b1")["description"], "Rolls <script>x</script> dice")
+        page = self.view("own1", "/bots/b1")
+        self.assertIn("Rolls &lt;script&gt;x&lt;/script&gt; dice", page)
+        self.assertNotIn("<script>x", page)
+
+
 class BadgeTests(Case):
     """Live SVG badges for READMEs."""
 

@@ -131,6 +131,7 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
 - **Invite link and README link**: owners and managers save their bot's yapin.gg link on its page. The ready-to-paste Markdown link (the bot's icon and name as one
   link that opens the bot to add it) is made for the team only: on `/panel/<bot id>` and under **Promo links** in Approvals. It uses the saved link, or
   `https://yapin.gg/bot/<bot id>` when the ID is a Yapin' bot ID (like shapes-bot's `/add`).
+- **Support server and description.** Owners and managers save a yapin.gg support-server invite on the bot's page (`/panel/support`); it is shown to the bot's people on the bot page. The bot's description is reported by the bot itself (its bio from its own profile, or its member info in a server it is in, up to 300 characters, shown as plain text), so owners change it with `set_profile(bio=...)`.
 - **Bot pictures.** Bots report their picture as Yapin' gives it (a path under `files.yapper.website/avatars/`); the panel only loads pictures from the allowed hosts.
 - **Versions.** Each bot shows two: the SDK's own version (`__version__` in `main.py`) and the PyPI package's.
 - **Report size.** `TELEMETRY_MAX_REPORT_BYTES` (default 2 GiB) applies only to bots with a valid token. Reports are read into memory, so lower it on a small host.

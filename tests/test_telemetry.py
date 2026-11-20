@@ -242,7 +242,7 @@ class ReportTests(TelemetryCase):
         self.assertEqual(report["event"], "preview")
         self.assertEqual(report["sdk"]["version"], yapper.__version__)
         self.assertIn("python", report["runtime"])
-        self.assertEqual(report["bot"], {"id": "bot1", "username": "Testy", "avatar": None, "uptime_seconds": None})
+        self.assertEqual(report["bot"], {"id": "bot1", "username": "Testy", "avatar": None, "description": None, "uptime_seconds": None})
         self.assertEqual(report["extra"], {})
         self.assertEqual(set(report["sdk"]), {"version", "package_version"})        # the SDK's (main.py) and PyPI's, nothing else
         self.assertEqual(report["servers"], {"count": 2, "members_total": 42, "online_total": 11})
@@ -294,6 +294,28 @@ class ReportTests(TelemetryCase):
                              ({"avatar": "/uploads/a.png"}, "https://www.yapin.gg/uploads/a.png"), ({"avatar": "data:image/png;base64,AAA"}, None),
                              ({"avatar_url": "http://x/a.png", "avatar_path": "p.png"}, "https://files.yapper.website/avatars/p.png"), ({"avatar": 5}, None)):
             self.assertEqual(self.t._avatar(me), expected)
+
+    def test_description_comes_from_the_profile_or_the_bots_member_info(self):
+        class FakeBot:
+            def __init__(self, member, servers=({"id": "s1"},)):
+                self._member, self._servers = member, servers
+            def servers(self):
+                return list(self._servers)
+            def member(self, sid, uid):
+                if isinstance(self._member, Exception):
+                    raise self._member
+                return self._member
+        t = self.t
+        t._desc_cache.clear()
+        self.assertEqual(t._description(FakeBot({}), {"id": "b", "bio": "  Rolls\n dice\x00 "}), "Rolls dice")
+        t._desc_cache.clear()
+        self.assertEqual(t._description(FakeBot({"user": {"bio": "From member info"}}), {"id": "b"}), "From member info")
+        t._desc_cache.clear()
+        self.assertEqual(t._description(FakeBot({"description": "x" * 900}), {"id": "b"}), "x" * t.MAX_DESCRIPTION)
+        for bad in (RuntimeError("down"), {}, {"bio": 5}):
+            t._desc_cache.clear()
+            self.assertIsNone(t._description(FakeBot(bad), {"id": "b"}))
+        t._desc_cache.clear()
 
     def test_report_never_contains_secrets_or_identifying_names(self):
         text = json.dumps(self.t.preview(self.bot_with_stuff()))

@@ -39,6 +39,7 @@ except ImportError:   # python-dotenv is in requirements.txt; real environment v
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import telemetry_auth as auth  # noqa: E402
+import telemetry_badge as badge  # noqa: E402
 import telemetry_panel as panel  # noqa: E402
 from telemetry_store import CONSOLE, ReasonRequired, Store, UserLookupError, can_approve, can_change_owner, can_revoke, valid_id  # noqa: E402
 
@@ -84,6 +85,8 @@ class Config:
         self.host, self.port = host, int(port)
         self.max_report_bytes = int(max_report_bytes)
         self.extra_image_hosts = set()
+        self.fetch_image = badge.fetch_image            # (url, allowed hosts) -> data: URI or None; replaced in tests
+        self.badge_limit = RateLimiter(240, 60)         # badges per minute per address
         self.api_limit = RateLimiter(120, 60)          # API reads per minute per address
         self.auth_limit = RateLimiter(30, 60)          # token requests per minute per address
         self.report_limit = RateLimiter(20, 3600)      # reports per hour per bot (they send every 30 minutes)
@@ -243,7 +246,8 @@ class Handler(BaseHTTPRequestHandler):
         """Tell the page helpers who is looking: their timezone, whether they are staff, which picture hosts to trust."""
         staff = bool(session and self.store.role_of(session.user_id))
         tz = self.store.timezone_of(session.user_id) if session else "auto"
-        panel.set_context(panel.Context(self.store, tz, self.cfg.oauth.image_hosts() | self.cfg.extra_image_hosts, staff))
+        panel.set_context(panel.Context(self.store, tz, self.cfg.oauth.image_hosts() | self.cfg.extra_image_hosts, staff,
+                                         self.cfg.panel_url or "http://" + self.headers.get("Host", "localhost")))
 
     def same_origin(self):
         origin = self.headers.get("Origin")
@@ -277,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True})
         if path == "/":
             return self.landing_page(query)
+        if path.startswith("/badge/") and path.endswith(".svg"):
+            return self.badge(path[len("/badge/"):-len(".svg")])
         if path == "/panel/search":
             return self.search(query)
         if path.startswith("/bots/"):
@@ -341,6 +347,28 @@ class Handler(BaseHTTPRequestHandler):
         self.html(200, make)
         if role:   # managers and owners can see which staff opened which tab; approvers' views are only for them
             store.audit_view(me, "page.view", "approver" if shown["tab"] == "approvals" else "manager", detail=shown["tab"])
+
+    def svg(self, data):
+        self._send(200, data, "image/svg+xml", [("Cache-Control", "public, max-age=300"),
+                                                 ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:"),
+                                                 ("Access-Control-Allow-Origin", "*")])
+
+    def badge(self, name):
+        """Public live badges for READMEs (see telemetry_badge.py). A bot's badge exists only once it is approved and its owner saved an invite link."""
+        cfg = self.cfg
+        if not cfg.badge_limit.allow(self.client()):
+            return self.reply(429, {"error": "slow_down"}, {"Retry-After": "60"})
+        if name == "stats":
+            bots = cfg.store.with_status("approved")
+            counts = [(b.get("servers") or 0) for b in bots if b.get("last_report_at")]
+            return self.svg(badge.stats_badge(len(counts), sum(counts)))
+        bot = cfg.store.get_bot(name) if valid_id(name) else None
+        if not bot or bot["status"] != "approved" or not bot.get("invite_url"):
+            return self.reply(404, {"error": "not_found"})
+        report = bot.get("last_report") or {}
+        servers = (report.get("servers") or {}).get("count")
+        icon = cfg.fetch_image(bot.get("avatar"), cfg.oauth.image_hosts() | cfg.extra_image_hosts) if bot.get("avatar") else None
+        self.svg(badge.bot_badge(bot["name"] or bot["bot_id"], servers, icon))
 
     def bot_page(self, path):
         """/bots/<id>: a bot's data for its owner, managers and viewers. /bots/<id>/live is the part that refreshes itself."""

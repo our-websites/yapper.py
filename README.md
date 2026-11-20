@@ -166,6 +166,13 @@ versions), so we know what to improve and which versions still need support. It 
 and we choose from the approved bots using the details listed above. If you do not turn it on, nothing is sent and nothing
 changes for you.
 
+### The telemetry page
+
+Bot owners log in with Yapin' at **<https://yapper-py.rustdactyl.tech>** to follow their bot's status, see what it reports, and
+save its invite and support links. The page also draws live badges that update themselves, so nothing here needs editing:
+
+![bots using yapper.py telemetry](https://yapper-py.rustdactyl.tech/badge/stats.svg)
+
 ### Featured bots
 
 Bots built on yapper.py that opted in to telemetry and were picked by us:

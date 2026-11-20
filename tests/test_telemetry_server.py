@@ -1541,5 +1541,57 @@ class FilesTests(unittest.TestCase):
         self.assertEqual(panel.EXAMPLE_REPORT["schema"], 1)
 
 
+class BadgeTests(Case):
+    """Live SVG badges for READMEs."""
+
+    def setUp(self):
+        super().setUp()
+        self.fetched = []
+        self.cfg.fetch_image = lambda url, hosts: (self.fetched.append((url, set(hosts))), "data:image/png;base64,AAAA")[1]
+        self.approve("b1", "own1", name="<b>Dice</b> & Co")
+        self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
+        tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
+        self.report(tok, bot={"id": "b1", "username": "<b>Dice</b> & Co", "avatar": "avatar/a.png"})
+
+    def test_stats_badge_is_public_svg(self):
+        status, _, text, resp = self.call("GET", "/badge/stats.svg")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.getheader("Content-Type"), "image/svg+xml")
+        self.assertIn("<svg", text)
+        self.assertIn("default-src 'none'", resp.getheader("Content-Security-Policy"))
+        self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+
+    def test_bot_badge_escapes_the_name(self):
+        status, _, text, _ = self.call("GET", "/badge/b1.svg")
+        self.assertEqual(status, 200)
+        self.assertNotIn("<b>", text)
+        self.assertIn("&lt;b&gt;Dice", text)
+
+    def test_bot_badge_needs_approval_and_an_invite(self):
+        self.store.set_invite("own1", "b1", "")
+        self.assertEqual(self.call("GET", "/badge/b1.svg")[0], 404)
+        self.assertEqual(self.call("GET", "/badge/nobody.svg")[0], 404)
+        self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
+        self.store.record_login("own2", "Two", None)
+        self.store.apply("own2", "p1")
+        self.assertEqual(self.call("GET", "/badge/p1.svg")[0], 404)
+
+    def test_staff_page_offers_the_live_badge_markdown(self):
+        self.store.set_role("boss", "app", "approver")
+        page = self.view("app", "/panel/b1")
+        self.assertIn(f"/badge/b1.svg)](https://www.yapin.gg/invite/dice)", page)
+        self.assertNotIn("<b>Dice", page)
+
+    def test_icon_is_only_fetched_from_allowed_hosts(self):
+        self.call("GET", "/badge/b1.svg")
+        for _, hosts in self.fetched:
+            self.assertEqual(hosts, self.cfg.oauth.image_hosts() | self.cfg.extra_image_hosts)
+
+    def test_fetch_image_rejects_other_hosts_and_schemes(self):
+        from telemetry_badge import fetch_image
+        for url in ("http://www.yapin.gg/a.png", "https://evil.test/a.png", "https://www.yapin.gg@evil.test/a.png", "", None):
+            self.assertIsNone(fetch_image(url, {"www.yapin.gg"}), url)
+
+
 if __name__ == "__main__":
     unittest.main()

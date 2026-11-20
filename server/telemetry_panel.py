@@ -251,8 +251,8 @@ def ago(seconds):
 class Context:
     """Per-request facts the page helpers need: who is looking (timezone, role), the store, and which image hosts are allowed."""
 
-    def __init__(self, store=None, tz="auto", avatar_hosts=(), staff=False):
-        self.store, self.tz, self.avatar_hosts, self.staff = store, tz, frozenset(avatar_hosts), staff
+    def __init__(self, store=None, tz="auto", avatar_hosts=(), staff=False, base=""):
+        self.store, self.tz, self.avatar_hosts, self.staff, self.base = store, tz, frozenset(avatar_hosts), staff, base
 
 
 _ctx = contextvars.ContextVar("panel_ctx", default=Context())
@@ -582,8 +582,11 @@ def staff_bot_page(bot, role, csrf, now, store):
     levels = ("approver", "manager") if role in ("owner", "manager") else ("approver",)
     events = store.read_audit(levels, bot_id=bot["bot_id"], limit=30)
     promo = promo_line(bot)
+    live = badge_line(bot)
+    live_box = (f'<p class="muted small">Or a live badge that updates its own server count, so the README never needs editing (the bot also needs its invite link saved):</p>'
+                f'<textarea readonly rows="2" aria-label="Live badge">{esc(live)}</textarea>') if live else ""
     box = (f'<section><h3>README link</h3><p class="muted small">Markdown with the bot\'s icon and name, as one link that opens the bot to add it.</p>'
-           f'<textarea readonly rows="3" aria-label="README link">{esc(promo)}</textarea></section>') if promo else \
+           f'<textarea readonly rows="3" aria-label="README link">{esc(promo)}</textarea>{live_box}</section>') if promo else \
           '<section><h3>README link</h3><p class="muted small">There is no invite link for this bot yet. Its owner can save one on their bot page.</p></section>'
     return (f'<p class="small"><a href="/panel/approvals">&larr; Approvals</a></p>{staff_row(bot, role, csrf, now)}{box}'
             f'<section><h3>Activity on this bot</h3>{activity_table(events, show_bot=False)}</section>')
@@ -613,6 +616,17 @@ def promo_line(bot):
     icon = bot.get("avatar")
     img = f'<img src="{html.escape(icon, quote=True)}" width="24" height="24" align="absmiddle"> ' if isinstance(icon, str) and icon.startswith("https://") else ""
     return f"[{img}**{name}**]({url.replace(' ', '%20').replace(')', '%29').replace('(', '%28')})"
+
+
+def badge_line(bot):
+    """The README line that never needs editing: a live badge (drawn by this server from the current numbers) linked to the invite."""
+    url, base = invite_for(bot), _ctx.get().base
+    if not url or not base or bot.get("status") != "approved":
+        return ""
+    name = " ".join((bot.get("name") or bot["bot_id"]).split())
+    for ch in "\\[]":
+        name = name.replace(ch, "\\" + ch)
+    return f"[![{name}]({base}/badge/{urllib.parse.quote(bot['bot_id'], safe='')}.svg)]({url.replace(' ', '%20').replace(')', '%29').replace('(', '%28')})"
 
 
 def invite_section(bot, csrf):

@@ -126,7 +126,7 @@ def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
            "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None,
-           "deny_reason": None, "denied_by": None, "denied_at": None}
+           "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None}
     bot.update(fields)
     return bot
 
@@ -533,7 +533,9 @@ class Store:
                                + [len(cmds) if isinstance(cmds, list) else None])
                 samples = samples[-MAX_SAMPLES:]
             avatar = clean_avatar(info.get("avatar"))
-            bot.update(last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
+            count = (report.get("servers") or {}).get("count") if isinstance(report.get("servers"), dict) else None
+            bot.update(servers=count if isinstance(count, int) and not isinstance(count, bool) and 0 <= count < 10 ** 9 else bot.get("servers"),
+                       last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
                        avatar=avatar or bot.get("avatar"),
                        sdk_version=str(sdk.get("version") or "")[:32] or bot["sdk_version"],
                        package_version=str(sdk.get("package_version") or "")[:32] or bot["package_version"])

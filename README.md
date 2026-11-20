@@ -171,13 +171,13 @@ changes for you.
 Bot owners log in with Yapin' at **<https://yapper-py.rustdactyl.tech>** to follow their bot's status, see what it reports, and
 save its invite and support links. The page also draws live badges that update themselves, so nothing here needs editing:
 
-![bots using yapper.py telemetry](https://yapper-py.rustdactyl.tech/badge/stats.svg)
+[![Telemetry Stats](https://yapper-py.rustdactyl.tech/badge/stats.svg)](https://yapper-py.rustdactyl.tech)
 
 ### Featured bots
 
 Bots built on yapper.py that opted in to telemetry and were picked by us:
 
-@@FEATURED@@
+[![Featured Bots Using Telemetry](https://yapper-py.rustdactyl.tech/badge/featured.svg)](https://yapper-py.rustdactyl.tech)
 
 Running the receiving end yourself? The server and its setup guide are in [`server/`](server/README.md).
 

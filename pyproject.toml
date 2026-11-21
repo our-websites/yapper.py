@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yapper.py"
-version = "1.8.4"
+version = "1.8.5"
 authors = [
   { name="LeAndre C.", email="leandre@lecanact.me" },
 ]
@@ -36,6 +36,7 @@ voice = [
 test = [
     "coverage>=7.0",
     "pickledb>=1.6",   # the telemetry server tests (server/) use it
+    "pillow>=13.0.0",
 ]
 
 [project.urls]

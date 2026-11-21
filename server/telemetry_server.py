@@ -365,10 +365,10 @@ class Handler(BaseHTTPRequestHandler):
         if name == "featured":   # every approved bot, so the README's list fills itself in
             from concurrent.futures import ThreadPoolExecutor
             hosts = cfg.oauth.image_hosts() | cfg.extra_image_hosts
-            bots = [b for b in cfg.store.with_status("approved")][:24]
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            bots = [b for b in cfg.store.with_status("approved")][:100]
+            with ThreadPoolExecutor(max_workers=8) as pool:
                 icons = list(pool.map(lambda b: cfg.fetch_image(b.get("avatar"), hosts) if b.get("avatar") else None, bots))
-            return self.svg(badge.featured_badge([(b["name"] or b["bot_id"], b.get("servers"), i) for b, i in zip(bots, icons)]))
+            return self.svg(badge.featured_badge([(b["name"] or b["bot_id"], b.get("servers"), b.get("members"), b.get("description"), i) for b, i in zip(bots, icons)]))
         bot = cfg.store.get_bot(name) if valid_id(name) else None
         if not bot or bot["status"] != "approved" or not bot.get("invite_url"):
             return self.reply(404, {"error": "not_found"})

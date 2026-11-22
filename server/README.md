@@ -36,7 +36,7 @@ of it (your host's proxy, Caddy, nginx, a tunnel) and set the public address as 
 Public SVGs drawn on request from the current numbers, so a README that shows one never needs editing:
 
 - `/badge/stats.svg`: how many bots use telemetry and how many servers they are in.
-- `/badge/featured.svg`: a grid of every approved bot (icon, name, server count), so a README's bot list fills itself in.
+- `/badge/featured.svg`: a grid of up to 100 approved bots (small icon, name, description, server and member counts), so a README's bot list fills itself in.
 - `/badge/<bot id>.svg`: one bot's icon, name and server count. It exists only for approved bots whose owner saved an invite link.
   Link it to the invite: `[![Name](https://your-panel/badge/<id>.svg)](https://yapin.gg/bot/<id>)`. The staff page for a bot (`/panel/<bot id>`) shows this line ready to copy.
 

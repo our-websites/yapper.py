@@ -1593,13 +1593,35 @@ class BadgeTests(Case):
         self.store.apply("own2", "pending1")
         self.store.see_bot("pending1", "Waiting Bot")
         self.store.set_invite("own1", "b1", "")          # shown even without an invite link
+        tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
+        self.report(tok, bot={"id": "b1", "username": "<b>Dice</b>_0220", "description": "Rolls dice & more"})
         status, _, text, resp = self.call("GET", "/badge/featured.svg")
         self.assertEqual(status, 200)
         self.assertEqual(resp.getheader("Content-Type"), "image/svg+xml")
-        self.assertIn("&lt;b&gt;Dice&lt;/b&gt;", text)
+        self.assertIn("&lt;b&gt;Dice&lt;/b&gt;#0220", text)
+        self.assertNotIn("_0220", text)
+        self.assertIn("Rolls dice &amp; more", text)
         self.assertNotIn("Waiting Bot", text)
         self.assertNotIn("<b>Dice", text)
         self.assertIn("3 servers", text)
+        self.assertIn("99 members", text)
+
+    def test_featured_badge_shows_up_to_100_bots(self):
+        import telemetry_badge as tb
+        svg = tb.featured_badge([(f"Bot{i}", 1, 2, None, None) for i in range(130)]).decode()
+        self.assertEqual(svg.count("<rect x"), 100)
+
+    def test_big_pictures_are_shrunk_before_embedding(self):
+        import base64, io
+        from PIL import Image
+        import telemetry_badge as tb
+        buf = io.BytesIO()
+        Image.effect_noise((900, 900), 80).convert("RGB").save(buf, "PNG")
+        self.assertGreater(len(buf.getvalue()), tb.MAX_EMBED_BYTES)
+        uri = tb._embed(buf.getvalue(), "image/png")
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        out = Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+        self.assertLessEqual(max(out.size), tb.ICON_PX * 2)
 
     def test_featured_badge_with_no_bots(self):
         self.assertIn("No approved bots yet", __import__("telemetry_badge").featured_badge([]).decode())

@@ -519,8 +519,13 @@ def _commands(report):
     return f"<details><summary>Commands ({len(cmds)})</summary><table><tbody>{rows}</tbody></table></details>"
 
 
+def _pretty(name):
+    """Usernames end in _0220 (their number): show it as #0220."""
+    return re.sub(r"_(\d{4})$", r"#\1", str(name or "").strip())
+
+
 def bot_title(bot):
-    return bot.get("name") or bot["bot_id"]
+    return _pretty(bot.get("name")) or bot["bot_id"]
 
 
 def bot_live(bot, now, level="owner", link=True, poll=False):
@@ -614,7 +619,7 @@ def promo_line(bot):
     url = invite_for(bot)
     if not url:
         return ""
-    name = (bot.get("name") or bot["bot_id"]).replace("\\", "\\\\")
+    name = (_pretty(bot.get("name")) or bot["bot_id"]).replace("\\", "\\\\")
     for ch in "[]*_`<>&|":
         name = name.replace(ch, "\\" + ch)
     name = " ".join(name.split())
@@ -628,7 +633,7 @@ def badge_line(bot):
     url, base = invite_for(bot), _ctx.get().base
     if not url or not base or bot.get("status") != "approved":
         return ""
-    name = " ".join((bot.get("name") or bot["bot_id"]).split())
+    name = " ".join((_pretty(bot.get("name")) or bot["bot_id"]).split())
     for ch in "\\[]":
         name = name.replace(ch, "\\" + ch)
     return f"[![{name}]({base}/badge/{urllib.parse.quote(bot['bot_id'], safe='')}.svg)]({url.replace(' ', '%20').replace(')', '%29').replace('(', '%28')})"

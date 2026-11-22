@@ -140,6 +140,11 @@ th,td{text-align:left;padding:.55rem .6rem;border-bottom:1px solid var(--line);v
 th{font-weight:600;color:var(--muted);font-size:.85rem}
 .avatar{width:2rem;height:2rem;border-radius:50%;background:var(--raised);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font:600 .9rem var(--serif);object-fit:cover;flex:none}
 .who-is{display:inline-flex;gap:.5rem;align-items:center}.who-is .avatar{width:1.5rem;height:1.5rem;font-size:.75rem}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(17rem,1fr));gap:.9rem;margin-bottom:.9rem}
+.card{display:flex;flex-direction:column;gap:.35rem;background:var(--surface);border:1px solid var(--line);border-radius:.6rem;padding:1rem 1.1rem;color:var(--text);text-decoration:none}
+.card:hover,.card:focus-visible{border-color:var(--accent)}
+.card h3{font-size:1.05rem}.card .desc{margin:0;color:var(--muted);font-size:.9rem;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card .small{margin:auto 0 0}.card.active .dot{background:var(--ok)}.card.waiting .dot,.card.quiet .dot{background:var(--wait)}
 .botname{display:flex;gap:.7rem;align-items:center}.botname .avatar{width:2.4rem;height:2.4rem}
 .suggest{position:absolute;z-index:5;background:var(--raised);border:1px solid var(--line);border-radius:.5rem;margin-top:.2rem;min-width:16rem;overflow:hidden}
 .suggest button{display:flex;width:100%;gap:.5rem;border:0;border-radius:0;background:none;text-align:left;align-items:center}
@@ -548,7 +553,7 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
         parts.append(f'<p class="desc">{esc(bot["description"])}</p>')
     if bot.get("support_url") and code not in ("pending", "denied", "removed"):
         parts.append(f'<p class="small"><a href="{esc(bot["support_url"])}" rel="noopener">Support server</a></p>')
-    if level != "owner" and code not in ("pending", "denied"):
+    if level in ("manager", "viewer") and code not in ("pending", "denied"):
         parts.append(f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
     if code == "pending":
         parts.append('<p class="muted">The bot has asked to send telemetry. It is waiting for someone on the team to approve it. '
@@ -567,6 +572,16 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
             parts.append(f"<details><summary>Latest report</summary><pre><code>{esc(json.dumps(report, indent=2))}</code></pre></details>")
     attrs = f' data-live="/bots/{esc(bot["bot_id"])}/live" data-every="30"' if poll else ""
     return f'<div class="live"{attrs}>{"".join(parts)}</div>'
+
+
+def bot_card(bot, now):
+    """A small card for the bot lists: picture, name, description and when it last reported. The whole card opens the bot's page, where the stats are."""
+    code, label = bot_state(bot, now)
+    name = bot["name"] or "Unnamed bot"
+    desc = f'<p class="desc">{esc(bot["description"])}</p>' if bot.get("description") else ""
+    last = f'Last report {when(bot["last_report_at"])}' if bot.get("last_report_at") else "No report yet"
+    return (f'<a class="card {code}" href="/bots/{esc(bot["bot_id"])}"><div class="botname">{avatar(bot.get("avatar"), name, 38, bot["bot_id"])}'
+            f'<h3>{esc(name)}</h3></div>{desc}<p class="muted small"><span class="dot"></span> {esc(last)}</p></a>')
 
 
 def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", members=(), poll=False):
@@ -596,7 +611,7 @@ def bot_page(bot, session_csrf, now, level, members):
 
 
 def staff_bot_page(bot, role, csrf, now, store):
-    """/panel/<bot id>: what the team sees about a bot: status and who owns it, never its data or key."""
+    """/panel/<bot id>: what the team sees about a bot: status, who owns it, and its report data (stats and the latest report), never its key."""
     levels = ("approver", "manager") if role in ("owner", "manager") else ("approver",)
     events = store.read_audit(levels, bot_id=bot["bot_id"], limit=30)
     promo = promo_line(bot)
@@ -606,7 +621,10 @@ def staff_bot_page(bot, role, csrf, now, store):
     box = (f'<section><h3>README link</h3><p class="muted small">Markdown with the bot\'s icon and name, as one link that opens the bot to add it.</p>'
            f'<textarea readonly rows="3" aria-label="README link">{esc(promo)}</textarea>{live_box}</section>') if promo else \
           '<section><h3>README link</h3><p class="muted small">There is no invite link for this bot yet. Its owner can save one on their bot page.</p></section>'
-    return (f'<p class="small"><a href="/panel/approvals">&larr; Approvals</a></p>{staff_row(bot, role, csrf, now)}{box}'
+    data = ""
+    if bot["status"] == "approved":
+        data = f'<section><h3>Report data</h3>{bot_live(bot, now, "staff", link=False)}</section>'
+    return (f'<p class="small"><a href="/panel/approvals">&larr; Approvals</a></p>{staff_row(bot, role, csrf, now)}{data}{box}'
             f'<section><h3>Activity on this bot</h3>{activity_table(events, show_bot=False)}</section>')
 
 
@@ -785,10 +803,12 @@ def bots_tab(store, user_id, csrf, now):
         return ('<div class="empty"><h2>No bots with telemetry</h2><p>You don\'t have any bots with telemetry on this account yet. '
                 'Turn it on in your bot with <code>telemetry.enable(bot)</code> and set <code>TELEMETRY_OWNER_ID</code> to your user ID '
                 'to see its status here before it is approved, or apply for it below.</p></div>' + apply_form(csrf))
-    rows = [owner_row(b, csrf, now, members=store.members(b["bot_id"]) if b["status"] == "approved" else ()) for b in mine]
-    rows += [owner_row(b, csrf, now, level=b["level"], members=store.members(b["bot_id"])) for b in shared]
+    # approved bots are small cards that open the bot's page; the rest (pending, denied, removed) need their message and actions on the list
+    cards = [bot_card(b, now) for b in mine + shared if b["status"] == "approved"]
+    rows = [owner_row(b, csrf, now) for b in mine + shared if b["status"] != "approved"]
     rows += [owner_row(b, csrf, now, key_box=False, claimed=True) for b in waiting]
-    return "".join(rows) + apply_form(csrf)
+    grid = f'<div class="cards">{"".join(cards)}</div>' if cards else ""
+    return grid + "".join(rows) + apply_form(csrf)
 
 
 def people_tab(store, role, query):

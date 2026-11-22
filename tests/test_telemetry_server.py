@@ -498,14 +498,14 @@ class PanelViewTests(Case):
         self.assertIn("Log out", text)
 
     def test_owner_sees_their_bot_data_and_when_the_next_update_is_due(self):
-        text = self.view("own1")
+        text = self.view("own1", "/bots/b1")
         for needle in ("Cool Bot", "Active", "Next expected", "SECRET-COMMAND-TEXT", "Servers", "99"):
             self.assertIn(needle, text)
         self.assertNotIn("Approvals", text)
 
     def test_private_key_is_not_in_the_page_until_clicked(self):
         key = self.store.get_bot("b1")["key"]
-        text = self.view("own1")
+        text = self.view("own1", "/bots/b1")
         self.assertNotIn(key, text)
         self.assertIn('data-key-for="', text)
         cookie, token = self.csrf("own1")
@@ -537,7 +537,8 @@ class PanelViewTests(Case):
         self.assertNotIn('data-key-for="', text)
         self.assertNotIn("don't have any bots", text)
         self.store.approve("pend", "claimer", "boss")
-        self.assertIn("Approved, waiting for the first report", self.view("claimer"))
+        self.assertIn("Approved, waiting for the first report", self.view("claimer", "/bots/pend"))
+        self.assertIn("No report yet", self.view("claimer"))
 
     def test_staff_see_bots_but_never_the_data_or_keys(self):
         key = self.store.get_bot("b1")["key"]
@@ -693,7 +694,8 @@ class PanelActionTests(Case):
         key = self.call("POST", "/panel/key", {"bot_id": "flow"}, {"Cookie": f"{auth.SESSION_COOKIE}={cookie}", "X-CSRF-Token": token})[1]["key"]
         tok = self.call("POST", "/", {"bot_id": "flow", "key": key})[1]["token"]
         self.assertEqual(self.report(tok, "flow")[0], 204)
-        page = self.view("own9")
+        self.assertIn("Real Name", self.view("own9"))
+        page = self.view("own9", "/bots/flow")
         self.assertIn("Real Name", page)
         self.assertIn("SECRET-COMMAND-TEXT", page)
         self.assertIn("Active", page)
@@ -883,7 +885,10 @@ class MultipleBotsPanelTests(Case):
         self.approve("b1", "own1", "One")
         self.approve("b2", "own1", "Two")
         text = self.view("own1")
-        self.assertEqual(text.count('data-key-for="'), 2)
+        self.assertIn('href="/bots/b1"', text)                       # approved bots are cards that open their own page
+        self.assertIn('href="/bots/b2"', text)
+        for bot in ("b1", "b2"):
+            self.assertEqual(self.view("own1", f"/bots/{bot}").count('data-key-for="'), 1)
         self.assertIn("One", text)
         self.assertIn("Two", text)
         r = self.act("own1", "/panel/apply", bot_id="b3")
@@ -1017,11 +1022,11 @@ class SharingPanelTests(Case):
     def test_owner_shares_through_the_panel(self):
         self.assertIn("msg=shared", self.loc(self.act("own", "/panel/share", bot_id="b1", user_id="v1", level="viewer")))
         self.assertIn("msg=shared", self.loc(self.act("own", "/panel/share", bot_id="b1", user_id="m1", level="manager")))
-        self.assertIn("Who can see this bot (2)", self.view("own"))
+        self.assertIn("Who can see this bot (2)", self.view("own", "/bots/b1"))
 
     def test_viewers_see_data_but_not_the_key(self):
         self.store.share("own", "b1", "v1", "viewer")
-        page = self.view("v1")
+        page = self.view("v1", "/bots/b1")
         for needle in ("Shared Bot", "SECRET-COMMAND-TEXT", "Shared with you as a viewer", "Next expected"):
             self.assertIn(needle, page)
         self.assertNotIn('data-key-for="', page)
@@ -1032,7 +1037,7 @@ class SharingPanelTests(Case):
 
     def test_managers_get_the_key_and_can_add_viewers_only(self):
         self.store.share("own", "b1", "m1", "manager")
-        page = self.view("m1")
+        page = self.view("m1", "/bots/b1")
         self.assertIn('data-key-for="', page)
         self.assertIn("Shared with you as a manager", page)
         self.assertEqual(self.key_status("m1"), 200)
@@ -1049,9 +1054,9 @@ class SharingPanelTests(Case):
 
     def test_removing_someone_takes_effect_at_once(self):
         self.store.share("own", "b1", "v1", "viewer")
-        self.assertIn("SECRET-COMMAND-TEXT", self.view("v1"))
+        self.assertIn("SECRET-COMMAND-TEXT", self.view("v1", "/bots/b1"))
         self.assertIn("msg=unshared", self.loc(self.act("own", "/panel/unshare", bot_id="b1", user_id="v1")))
-        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("v1"))
+        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("v1", "/bots/b1"))
         self.assertIn("don't have any bots", self.view("v1"))
 
     def test_staff_who_are_given_a_bot_get_the_my_bots_tab(self):
@@ -1067,9 +1072,9 @@ class SharingPanelTests(Case):
         bot = self.store.get_bot("b1")
         self.assertEqual(bot["owner_id"], "own-new")
         self.assertNotEqual(bot["key"], self.key)
-        self.assertIn("SECRET-COMMAND-TEXT", self.view("own-new"))
-        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("own"))      # the old account is out
-        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("v1"))
+        self.assertIn("SECRET-COMMAND-TEXT", self.view("own-new", "/bots/b1"))
+        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("own", "/bots/b1"))      # the old account is out
+        self.assertNotIn("SECRET-COMMAND-TEXT", self.view("v1", "/bots/b1"))
         self.assertIn("msg=denied", self.loc(self.act("stranger", "/panel/owner", bot_id="b1", owner_id="x")))
         self.assertIn("msg=denied", self.loc(self.act("own", "/panel/owner", bot_id="b1", owner_id="x")))   # the bot's owner can't hand it over alone
 
@@ -1159,7 +1164,7 @@ class PanelFeatureTests(Case):
         self.assertIn("approved", approver_view)
         self.assertNotIn("opened the team tab", approver_view)                           # approvers don't get the manager level
         self.assertNotIn("Activity", self.view("own", "/panel/bots").split("<nav", 1)[1].split("</nav>")[0])
-        self.assertIn("Activity on this bot", self.view("own", "/panel/bots"))
+        self.assertIn("Activity on this bot", self.view("own", "/bots/b1"))
 
     def test_bot_owner_sees_what_others_did_to_their_bot(self):
         self.act("own", "/panel/share", bot_id="b1", user_id="Viewy", level="viewer")
@@ -1167,7 +1172,7 @@ class PanelFeatureTests(Case):
         events = [(e["kind"], e["actor"]) for e in self.store.read_audit(bot_id="b1")]
         self.assertIn(("bot.share", "own"), events)
         self.assertIn(("bot.invite", "own"), events)
-        self.assertIn("gave access to", self.view("own", "/panel/bots"))
+        self.assertIn("gave access to", self.view("own", "/bots/b1"))
 
     def test_times_follow_the_viewers_timezone(self):
         ts = 1_700_000_000                                                               # 2023-11-14 22:13:20 UTC
@@ -1227,7 +1232,7 @@ class PanelFeatureTests(Case):
             self.assertIn("msg=invalid", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url=bad)), bad)
         self.assertIn("msg=invite_saved", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")))
         line = "[**Promo Bot**](https://www.yapin.gg/invite/promo)"
-        for page in (self.view("own", "/panel/bots"), self.view("own", "/bots/b1")):
+        for page in (self.view("own", "/bots/b1"), self.view("own", "/bots/b1")):
             self.assertIn("https://www.yapin.gg/invite/promo", page)                       # owners see and can change the link...
             self.assertNotIn("**Promo Bot**", page)                                         # ...but not the Markdown
             self.assertNotIn("README link", page)
@@ -1273,13 +1278,14 @@ class PanelFeatureTests(Case):
         self.assertIn("setTimeout(refresh", panel.JS)
         self.assertIn("document.hidden", panel.JS)                                           # no polling in a hidden tab
 
-    def test_staff_bot_page_has_no_data_and_views_are_logged(self):
+    def test_staff_bot_page_shows_report_data_but_never_the_key_and_views_are_logged(self):
         self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot"}, "servers": {"count": 3}, "commands": [{"name": "SECRET-COMMAND-TEXT"}]})
         text = self.view("app", "/panel/b1")
         self.assertIn("Promo Bot", text)
-        self.assertNotIn("SECRET-COMMAND-TEXT", text)
-        self.assertNotIn("Latest report", text)
-        self.assertNotIn('data-key-for="', text)
+        self.assertIn("SECRET-COMMAND-TEXT", text)                                           # staff can read the report data...
+        self.assertIn("Latest report", text)
+        self.assertNotIn('data-key-for="', text)                                             # ...but never the key
+        self.assertNotIn(self.store.get_bot("b1")["key"], text)
         self.assertIn("viewed", self.view("boss", "/panel/activity"))                        # managers and owners see who looked at which bot
         self.assertNotIn("viewed", self.view("app", "/panel/activity"))                      # approvers don't get the manager level
         self.assertEqual(self.call("GET", "/panel/nope", user="app")[0], 200)                # not a bot: the first tab
@@ -1610,6 +1616,19 @@ class BadgeTests(Case):
         import telemetry_badge as tb
         svg = tb.featured_badge([(f"Bot{i}", 1, 2, None, None) for i in range(130)]).decode()
         self.assertEqual(svg.count("<rect x"), 100)
+
+    def test_bot_lists_show_small_cards_that_open_the_stats(self):
+        tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
+        self.report(tok, bot={"id": "b1", "username": "Dice", "description": "Rolls dice"}, commands=[{"name": "SECRET-COMMAND-TEXT"}])
+        for path in ("/panel/bots", "/panel"):
+            page = self.view("own1", path)
+            self.assertIn('class="card', page)
+            self.assertIn('href="/bots/b1"', page)
+            self.assertIn("Rolls dice", page)
+            self.assertIn("Last report", page)
+            self.assertNotIn("SECRET-COMMAND-TEXT", page)                    # the stats are on the bot's page
+            self.assertNotIn('data-key-for="b1"', page)
+        self.assertIn("SECRET-COMMAND-TEXT", self.view("own1", "/bots/b1"))
 
     def test_bot_pictures_come_through_the_server(self):
         self.assertIn('src="/avatar/b1.png"', self.view("own1", "/bots/b1"))

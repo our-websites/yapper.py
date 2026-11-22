@@ -53,7 +53,7 @@ Roles are by Yapin' user ID.
 | **Approver** | Approve bots and switch a bot to a new owner account (for people who moved to a new account). Nothing else |
 | **Bot owner** | Whoever is set as a bot's owner when it is approved: sees that bot's data, when its next report is due, and its private key, and can share the bot (below) |
 
-Staff see which bots exist and their status, never a bot's data or key. Someone who is staff and also owns a bot gets an extra
+Staff see which bots exist, their status and their report data (stats and the latest report), but never a bot's key. Someone who is staff and also owns a bot gets an extra
 **My bots** tab. Logging in with no role and no bots shows a message that you don't have any bots with telemetry.
 
 ## Sharing a bot
@@ -127,8 +127,10 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
   who opened which tab, and who read which bot's data through an API key.
 - **Settings**: timezone (times are stored in UTC and shown in yours; UTC does no conversion) and API keys (up to 5, read-only, shown once).
 - **Bot pages.** Owners, managers and viewers open a bot's data at `/bots/<bot id>`; the status, numbers and growth on it refresh by themselves
-  every 30 seconds while the tab is visible. The team never sees a bot's data: `/bots/<id>` sends them to `/panel/<bot id>`, which has the status, owner,
-  owner/approval actions, activity on the bot and the README link.
+  every 30 seconds while the tab is visible. The team sees the same data on `/panel/<bot id>` (`/bots/<id>` sends them there), along with the owner,
+  owner/approval actions, activity on the bot and the README link, but never the key.
+- **Bot cards.** In **My bots** and `/panel`, an approved bot is a small card: picture, name, description and when it last reported. Pressing the card opens its page
+  with the stats. Bots that are pending, denied or removed stay as full rows, because their message and actions are on the list.
 - **Invite link and README link**: owners and managers save their bot's yapin.gg link on its page. The ready-to-paste Markdown link (the bot's icon and name as one
   link that opens the bot to add it) is made for the team only: on `/panel/<bot id>` and under **Promo links** in Approvals. It uses the saved link, or
   `https://yapin.gg/bot/<bot id>` when the ID is a Yapin' bot ID (like shapes-bot's `/add`).

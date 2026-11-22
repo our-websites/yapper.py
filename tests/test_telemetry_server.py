@@ -1296,8 +1296,8 @@ class PanelFeatureTests(Case):
     def test_bot_pictures_from_paths(self):
         self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Promo Bot", "avatar": "abc/pic 1.png"}})
         self.assertEqual(self.store.get_bot("b1")["avatar"], "https://files.yapper.website/avatars/abc/pic%201.png")
-        self.assertIn('src="https://files.yapper.website/avatars/abc/pic%201.png"', self.view("own", "/bots/b1"))
-        self.assertIn('src="https://files.yapper.website/avatars/abc/pic%201.png"', self.view("app", "/panel/b1"))
+        self.assertIn('src="/avatar/b1.png"', self.view("own", "/bots/b1"))
+        self.assertIn('src="/avatar/b1.png"', self.view("app", "/panel/b1"))
         for bad in ("../../etc/passwd", "javascript:alert(1)", "//evil.example/x.png", "a" * 400, 5, ""):
             self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "avatar": bad}})
             self.assertEqual(self.store.get_bot("b1")["avatar"], "https://files.yapper.website/avatars/abc/pic%201.png", repr(bad))   # kept the good one
@@ -1574,7 +1574,7 @@ class BadgeTests(Case):
     def setUp(self):
         super().setUp()
         self.fetched = []
-        self.cfg.fetch_image = lambda url, hosts: (self.fetched.append((url, set(hosts))), "data:image/png;base64,AAAA")[1]
+        self.cfg.fetch_image = lambda url, hosts, **kw: (self.fetched.append((url, set(hosts))), "data:image/png;base64,AAAA")[1]
         self.approve("b1", "own1", name="<b>Dice</b> & Co")
         self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
         tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
@@ -1610,6 +1610,17 @@ class BadgeTests(Case):
         import telemetry_badge as tb
         svg = tb.featured_badge([(f"Bot{i}", 1, 2, None, None) for i in range(130)]).decode()
         self.assertEqual(svg.count("<rect x"), 100)
+
+    def test_bot_pictures_come_through_the_server(self):
+        self.assertIn('src="/avatar/b1.png"', self.view("own1", "/bots/b1"))
+        status, _, _, resp = self.call("GET", "/avatar/b1.png")
+        self.assertEqual((status, resp.getheader("Content-Type")), (200, "image/png"))
+        self.assertEqual(self.call("GET", "/avatar/nobody.png")[0], 404)
+
+    def test_any_public_host_is_ok_for_bot_pictures_but_never_private_ones(self):
+        import telemetry_badge as tb
+        for url in ("https://127.0.0.1/a.png", "https://localhost/a.png", "https://10.0.0.5/a.png", "http://cdn.example/a.png"):
+            self.assertIsNone(tb.fetch_image(url, set(), public=True), url)
 
     def test_big_pictures_are_shrunk_before_embedding(self):
         import base64, io

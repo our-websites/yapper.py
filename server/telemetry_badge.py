@@ -29,10 +29,11 @@ _lock = threading.Lock()
 BG, LINE, TEXT, MUTED, ACCENT = "#151a2c", "#283054", "#e9ecf6", "#9aa3c0", "#a393ff"
 
 
-def fetch_image(url, hosts, timeout=4):
-    """The picture at an https URL on one of `hosts` as a data: URI, or None. Never follows redirects off the allowed hosts."""
+def fetch_image(url, hosts, timeout=4, public=False):
+    """The picture at an https URL as a data: URI, or None. The URL's host must be one of `hosts`, or (public=True, for bot pictures,
+    whose real host we can't know in advance) any host on the public internet; the server does the fetching, so nobody's browser contacts it."""
     parsed = urllib.parse.urlparse(url or "")
-    if parsed.scheme != "https" or parsed.hostname not in hosts or parsed.username or parsed.password:
+    if parsed.scheme != "https" or parsed.username or parsed.password or not (parsed.hostname in hosts or (public and _is_public(parsed.hostname))):
         return None
     now = time.time()
     with _lock:

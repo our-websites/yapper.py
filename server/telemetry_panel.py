@@ -158,6 +158,12 @@ footer{border-top:1px solid var(--line);color:var(--muted);font-size:.85rem;padd
 """
 
 JS = """
+document.addEventListener("error", function (e) {      // a bot picture that can't load becomes its first letter
+  var img = e.target;
+  if (img && img.tagName === "IMG" && img.dataset.letter) {
+    var span = document.createElement("span"); span.className = "avatar"; span.textContent = img.dataset.letter; img.replaceWith(span);
+  }
+}, true);
 function localTimes(root) {
   for (const el of root.querySelectorAll('time[datetime]')) {
     const d = new Date(el.getAttribute('datetime'));
@@ -292,11 +298,13 @@ def when(ts):
     return f'<time datetime="{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))}">{utc}</time>'
 
 
-def avatar(url, name, size=32):
+def avatar(url, name, size=32, bot_id=None):
     """A profile picture, only from allowed https hosts (so a bot can't make staff browsers fetch from anywhere);
     otherwise the first letter of the name."""
     host = urllib.parse.urlparse(url or "").hostname if url and str(url).startswith("https://") else None
     letter = esc((str(name or "?").strip() or "?")[0].upper())
+    if bot_id and host:        # bot pictures come through this server (/avatar/<id>.png): it fetches and shrinks them
+        return (f'<img class="avatar" src="/avatar/{esc(urllib.parse.quote(bot_id, safe=""))}.png" alt="" width="{size}" height="{size}" loading="lazy" data-letter="{letter}">')
     if host and host in _ctx.get().avatar_hosts:
         return f'<img class="avatar" src="{esc(url)}" alt="" width="{size}" height="{size}" loading="lazy" referrerpolicy="no-referrer">'
     return f'<span class="avatar" aria-hidden="true">{letter}</span>'
@@ -534,7 +542,7 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
     name = bot["name"] or "Unnamed bot"
     report = bot.get("last_report")
     title = f'<a href="/bots/{esc(bot["bot_id"])}">{esc(name)}</a>' if link and bot["status"] == "approved" else esc(name)
-    parts = [f'<div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3>{title}</h3></div><span class="status"><span class="dot"></span>{esc(label)}</span></div>',
+    parts = [f'<div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38, bot["bot_id"])}<h3>{title}</h3></div><span class="status"><span class="dot"></span>{esc(label)}</span></div>',
              f'<div class="id">{esc(bot["bot_id"])}</div>']
     if bot.get("description") and code not in ("pending", "denied", "removed"):
         parts.append(f'<p class="desc">{esc(bot["description"])}</p>')
@@ -707,7 +715,7 @@ def staff_row(bot, role, csrf, now):
         forms = (f'<form class="inline" method="post" action="/panel/approve">{hidden}'
                  f'<label>Owner (username or user ID)<input data-people name="owner_id" required value="{esc(owner)}" autocomplete="off"></label>'
                  f'<button type="submit">Approve{" again" if bot["status"] == "revoked" else " anyway"}</button></form>')
-    return (f'<div class="row {code}"><div class="edge"></div><div class="in"><div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38)}<h3><a href="/panel/{esc(bot["bot_id"])}">{esc(name)}</a></h3></div>'
+    return (f'<div class="row {code}"><div class="edge"></div><div class="in"><div class="head"><div class="botname">{avatar(bot.get("avatar"), name, 38, bot["bot_id"])}<h3><a href="/panel/{esc(bot["bot_id"])}">{esc(name)}</a></h3></div>'
             f'<span class="status"><span class="dot"></span>{esc(label)}</span></div><div class="head">{"".join(meta)}</div>{forms}</div></div>')
 
 

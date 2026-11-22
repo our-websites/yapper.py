@@ -134,7 +134,7 @@ def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
            "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None, "support_url": None, "description": None,
-           "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None}
+           "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None, "members": None}
     bot.update(fields)
     return bot
 
@@ -528,7 +528,7 @@ class Store:
         now = int(now or time.time())
         info = report.get("bot") if isinstance(report.get("bot"), dict) else {}
         sdk = report.get("sdk") if isinstance(report.get("sdk"), dict) else {}
-        name = str(info["username"])[:80] if info.get("username") else None
+        name = re.sub(r"_(\d{4})$", r"#\1", str(info["username"])[:80]) if info.get("username") else None   # name_0220 -> name#0220
         with self._lock:
             bot, members = self._read(bot_id)
             if bot is None:
@@ -542,7 +542,9 @@ class Store:
                 samples = samples[-MAX_SAMPLES:]
             avatar = clean_avatar(info.get("avatar"))
             count = (report.get("servers") or {}).get("count") if isinstance(report.get("servers"), dict) else None
-            bot.update(servers=count if isinstance(count, int) and not isinstance(count, bool) and 0 <= count < 10 ** 9 else bot.get("servers"),
+            total = (report.get("servers") or {}).get("members_total") if isinstance(report.get("servers"), dict) else None
+            bot.update(members=total if isinstance(total, int) and not isinstance(total, bool) and 0 <= total < 10 ** 12 else bot.get("members"),
+                       servers=count if isinstance(count, int) and not isinstance(count, bool) and 0 <= count < 10 ** 9 else bot.get("servers"),
                        last_report=report, last_report_at=now, last_seen=now, name=name or bot["name"], samples=samples,
                        avatar=avatar or bot.get("avatar"), description=clean_description(info.get("description")) or bot.get("description"),
                        sdk_version=str(sdk.get("version") or "")[:32] or bot["sdk_version"],

@@ -19,6 +19,7 @@ What it serves:
 
 Settings are environment variables (a .env file next to this one is read too); see .env.example for all of them.
 """
+import base64
 import argparse
 import hmac
 import ipaddress
@@ -281,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True})
         if path == "/":
             return self.landing_page(query)
+        if path.startswith("/avatar/") and path.endswith(".png"):
+            return self.bot_avatar(path[len("/avatar/"):-len(".png")])
         if path.startswith("/badge/") and path.endswith(".svg"):
             return self.badge(path[len("/badge/"):-len(".svg")])
         if path == "/panel/search":
@@ -353,6 +356,19 @@ class Handler(BaseHTTPRequestHandler):
                                                  ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:"),
                                                  ("Access-Control-Allow-Origin", "*")])
 
+    def bot_avatar(self, bot_id):
+        """A bot's picture, fetched and shrunk by this server, so pages never load images from hosts we don't control."""
+        cfg = self.cfg
+        if not cfg.badge_limit.allow(self.client()):
+            return self.reply(429, {"error": "slow_down"}, {"Retry-After": "60"})
+        bot = cfg.store.get_bot(bot_id) if valid_id(bot_id) else None
+        uri = cfg.fetch_image(bot["avatar"], cfg.oauth.image_hosts() | cfg.extra_image_hosts, public=True) if bot and bot.get("avatar") else None
+        if not uri or not uri.startswith("data:image/"):
+            return self.reply(404, {"error": "not_found"})
+        head, _, b64 = uri.partition(",")
+        self._send(200, base64.b64decode(b64), head[5:].split(";")[0], [("Cache-Control", "public, max-age=3600"), ("Content-Security-Policy", "default-src 'none'"),
+                                                                     ("Cross-Origin-Resource-Policy", "cross-origin")])
+
     def badge(self, name):
         """Public live badges for READMEs (see telemetry_badge.py). A bot's badge exists only once it is approved and its owner saved an invite link."""
         cfg = self.cfg
@@ -365,16 +381,16 @@ class Handler(BaseHTTPRequestHandler):
         if name == "featured":   # every approved bot, so the README's list fills itself in
             from concurrent.futures import ThreadPoolExecutor
             hosts = cfg.oauth.image_hosts() | cfg.extra_image_hosts
-            bots = [b for b in cfg.store.with_status("approved")][:24]
-            with ThreadPoolExecutor(max_workers=6) as pool:
-                icons = list(pool.map(lambda b: cfg.fetch_image(b.get("avatar"), hosts) if b.get("avatar") else None, bots))
-            return self.svg(badge.featured_badge([(b["name"] or b["bot_id"], b.get("servers"), i) for b, i in zip(bots, icons)]))
+            bots = [b for b in cfg.store.with_status("approved")][:100]
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                icons = list(pool.map(lambda b: cfg.fetch_image(b.get("avatar"), hosts, public=True) if b.get("avatar") else None, bots))
+            return self.svg(badge.featured_badge([(b["name"] or b["bot_id"], b.get("servers"), b.get("members"), b.get("description"), i) for b, i in zip(bots, icons)]))
         bot = cfg.store.get_bot(name) if valid_id(name) else None
         if not bot or bot["status"] != "approved" or not bot.get("invite_url"):
             return self.reply(404, {"error": "not_found"})
         report = bot.get("last_report") or {}
         servers = (report.get("servers") or {}).get("count")
-        icon = cfg.fetch_image(bot.get("avatar"), cfg.oauth.image_hosts() | cfg.extra_image_hosts) if bot.get("avatar") else None
+        icon = cfg.fetch_image(bot.get("avatar"), cfg.oauth.image_hosts() | cfg.extra_image_hosts, public=True) if bot.get("avatar") else None
         self.svg(badge.bot_badge(bot["name"] or bot["bot_id"], servers, icon))
 
     def bot_page(self, path):

@@ -11,7 +11,7 @@ import time
 import urllib.parse
 import zoneinfo
 
-from telemetry_store import assignable_roles, bot_state, can_approve, can_change_owner, can_remove_roles, can_revoke
+from telemetry_store import assignable_roles, bot_state, can_approve, can_change_owner, can_remove_roles, can_revoke, invite_for
 
 # What a report looks like (tests check this has the same shape as yapper.telemetry.collect()).
 EXAMPLE_REPORT = {
@@ -45,6 +45,8 @@ MESSAGES = {
     "saved": ("ok", "Saved."),
     "support_saved": ("ok", "Support server link saved."),
     "invite_saved": ("ok", "Invite link saved. Copy the promo link from the bot\'s Invite link section."),
+    "public_on": ("ok", "This bot is public: everyone who logs in can see its data (never its key)."),
+    "public_off": ("ok", "This bot is private again."),
     "key_removed": ("ok", "API key removed. It stops working right away."),
     "login_needed": ("bad", "Log in to open the panel."),
     "bot_denied": ("ok", "Bot denied. Its owner can see your reason in the panel, and the bot is told the next time it asks."),
@@ -144,7 +146,7 @@ th{font-weight:600;color:var(--muted);font-size:.85rem}
 .card{display:flex;flex-direction:column;gap:.35rem;background:var(--surface);border:1px solid var(--line);border-radius:.6rem;padding:1rem 1.1rem;color:var(--text);text-decoration:none}
 .card:hover,.card:focus-visible{border-color:var(--accent)}
 .card h3{font-size:1.05rem}.card .desc{margin:0;color:var(--muted);font-size:.9rem;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.card .small{margin:auto 0 0}.card.active .dot{background:var(--ok)}.card.waiting .dot,.card.quiet .dot{background:var(--wait)}
+.card .tag{margin-left:auto;font-size:.75rem;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:.05rem .5rem;white-space:nowrap}.card .small{margin:auto 0 0}.card.active .dot{background:var(--ok)}.card.waiting .dot,.card.quiet .dot{background:var(--wait)}
 .botname{display:flex;gap:.7rem;align-items:center}.botname .avatar{width:2.4rem;height:2.4rem}
 .suggest{position:absolute;z-index:5;background:var(--raised);border:1px solid var(--line);border-radius:.5rem;margin-top:.2rem;min-width:16rem;overflow:hidden}
 .suggest button{display:flex;width:100%;gap:.5rem;border:0;border-radius:0;background:none;text-align:left;align-items:center}
@@ -495,7 +497,7 @@ def growth(bot):
 
 EVENT_TEXT = {
     "bot.approve": "approved", "bot.deny": "denied", "bot.revoke": "removed access for", "bot.owner": "switched the owner of", "bot.apply": "applied for",
-    "bot.invite": "set the invite link of", "bot.support": "set the support server of", "bot.share": "gave access to", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
+    "bot.invite": "set the invite link of", "bot.support": "set the support server of", "bot.share": "gave access to", "bot.public": "changed who can see", "bot.unshare": "removed access from", "bot.view": "viewed", "key.reveal": "showed the private key of",
     "key.rotate": "made a new private key for", "role.add": "gave a role to", "role.remove": "removed the role of", "announce.send": "sent an announcement to",
     "page.view": "opened the", "apikey.create": "made an API key", "apikey.remove": "removed an API key", "api.read": "read data through the API for",
     "settings.timezone": "changed their timezone to",
@@ -554,7 +556,8 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
     if bot.get("support_url") and code not in ("pending", "denied", "removed"):
         parts.append(f'<p class="small"><a href="{esc(bot["support_url"])}" rel="noopener">Support server</a></p>')
     if level in ("manager", "viewer") and code not in ("pending", "denied"):
-        parts.append(f'<div class="muted small">Shared with you as {"a manager" if level == "manager" else "a viewer"} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
+        who = "a manager" if level == "manager" else ("a viewer of this public bot" if bot.get("public") else "a viewer")
+        parts.append(f'<div class="muted small">{"Open to everyone" if bot.get("public") and level == "viewer" else "Shared with you"} as {who} (owner <span class="id">{esc(bot["owner_id"])}</span>)</div>')
     if code == "pending":
         parts.append('<p class="muted">The bot has asked to send telemetry. It is waiting for someone on the team to approve it. '
                      'Nothing is shared until then, and you will see its data and private key here once it is.</p>')
@@ -574,14 +577,14 @@ def bot_live(bot, now, level="owner", link=True, poll=False):
     return f'<div class="live"{attrs}>{"".join(parts)}</div>'
 
 
-def bot_card(bot, now):
+def bot_card(bot, now, tag=""):
     """A small card for the bot lists: picture, name, description and when it last reported. The whole card opens the bot's page, where the stats are."""
     code, label = bot_state(bot, now)
     name = bot["name"] or "Unnamed bot"
     desc = f'<p class="desc">{esc(bot["description"])}</p>' if bot.get("description") else ""
     last = f'Last report {when(bot["last_report_at"])}' if bot.get("last_report_at") else "No report yet"
     return (f'<a class="card {code}" href="/bots/{esc(bot["bot_id"])}"><div class="botname">{avatar(bot.get("avatar"), name, 38, bot["bot_id"])}'
-            f'<h3>{esc(name)}</h3></div>{desc}<p class="muted small"><span class="dot"></span> {esc(last)}</p></a>')
+            f'<h3>{esc(name)}</h3>{f"<span class=tag>{esc(tag)}</span>" if tag else ""}</div>{desc}<p class="muted small"><span class="dot"></span> {esc(last)}</p></a>')
 
 
 def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", members=(), poll=False):
@@ -597,6 +600,8 @@ def owner_row(bot, csrf, now, key_box=True, claimed=False, level="owner", member
     if code not in ("pending", "denied") and bot["status"] == "approved" and level in ("owner", "manager"):
         parts.append(invite_section(bot, csrf))
         parts.append(access_section(bot, csrf, level, members))
+        if level == "owner":
+            parts.append(visibility_section(bot, csrf))
     if code not in ("pending", "removed", "denied") and _ctx.get().store:
         events = _ctx.get().store.read_audit(("approver", "manager"), bot_id=bot["bot_id"], limit=15)
         parts.append(f'<details><summary>Activity on this bot</summary>{activity_table(events, show_bot=False)}</details>')
@@ -616,11 +621,11 @@ def staff_bot_page(bot, role, csrf, now, store):
     events = store.read_audit(levels, bot_id=bot["bot_id"], limit=30)
     promo = promo_line(bot)
     live = badge_line(bot)
-    live_box = (f'<p class="muted small">Or a live badge that updates its own server count, so the README never needs editing (the bot also needs its invite link saved):</p>'
+    live_box = (f'<p class="muted small">Or a live badge that updates its own server count, so the README never needs editing (its link is the bot\'s page on Yapin\'):</p>'
                 f'<textarea readonly rows="2" aria-label="Live badge">{esc(live)}</textarea>') if live else ""
     box = (f'<section><h3>README link</h3><p class="muted small">Markdown with the bot\'s icon and name, as one link that opens the bot to add it.</p>'
            f'<textarea readonly rows="3" aria-label="README link">{esc(promo)}</textarea>{live_box}</section>') if promo else \
-          '<section><h3>README link</h3><p class="muted small">There is no invite link for this bot yet. Its owner can save one on their bot page.</p></section>'
+          '<section><h3>README link</h3><p class="muted small">This bot\'s ID can\'t make a Yapin\' bot link.</p></section>'
     data = ""
     if bot["status"] == "approved":
         data = f'<section><h3>Report data</h3>{bot_live(bot, now, "staff", link=False)}</section>'
@@ -629,14 +634,6 @@ def staff_bot_page(bot, role, csrf, now, store):
 
 
 UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
-
-def invite_for(bot):
-    """The link that adds the bot: the one saved for it, else https://yapin.gg/bot/<id> when its ID is a Yapin' bot ID (a UUID),
-    the same shape shapes-bot's /add uses."""
-    if bot.get("invite_url"):
-        return bot["invite_url"]
-    return f"https://yapin.gg/bot/{bot['bot_id']}" if UUID.match(str(bot["bot_id"])) else ""
 
 
 def promo_line(bot):
@@ -666,19 +663,31 @@ def badge_line(bot):
 
 
 def invite_section(bot, csrf):
-    """Owners and managers save the bot's yapin.gg link here. (The ready-to-paste README link is made for the team, in the staff panel.)"""
+    """Owners and managers can change the bot's link here. (The ready-to-paste README link is made for the team, in the staff panel.)"""
     hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
     link = invite_for(bot)
+    custom = bool(link) and link == bot.get("invite_url")
     shown = (f'<p class="small">Invite link: <a href="{esc(link)}" rel="noopener">{esc(link)}</a>'
-             f'{"" if bot.get("invite_url") else " <span class=muted>(made from the bot ID; save a link below to use another)</span>"}</p>') if link else \
-            '<p class="muted small">Add your bot\'s yapin.gg link (https://yapin.gg/bot/...) so people can add it from lists the team features.</p>'
-    return (f'<details><summary>Invite link</summary>{shown}<form class="inline" method="post" action="/panel/invite">{hidden}'
-            f'<label>yapin.gg invite link<input name="invite_url" value="{esc(bot.get("invite_url"))}" placeholder="https://www.yapin.gg/invite/yourbot" autocomplete="off"></label>'
+             f'{"" if custom else " <span class=muted>(made from the bot ID, nothing to set up)</span>"}</p>') if link else ""
+    return (f'<details><summary>Invite link</summary>{shown}<p class="muted small">Bots are added from their page on Yapin\', https://www.yapin.gg/bot/&lt;BotID&gt;. '
+            f'Leave this empty to use that link; a server invite does not work here.</p>'
+            f'<form class="inline" method="post" action="/panel/invite">{hidden}'
+            f'<label>Bot link (optional)<input name="invite_url" value="{esc(bot.get("invite_url") if custom else "")}" placeholder="https://www.yapin.gg/bot/{esc(bot["bot_id"])}" autocomplete="off"></label>'
             f'<button type="submit">Save</button></form></details>'
             f'<details><summary>Support server</summary><p class="muted small">Shown on your bot\'s page so people can get help. Your bot\'s description is read from its own profile; change it in your bot (set_profile).</p>'
             f'<form class="inline" method="post" action="/panel/support">{hidden}'
             f'<label>yapin.gg invite link<input name="support_url" value="{esc(bot.get("support_url"))}" placeholder="https://www.yapin.gg/invite/yourserver" autocomplete="off"></label>'
             f'<button type="submit">Save</button></form></details>')
+
+
+def visibility_section(bot, csrf):
+    """The owner chooses whether everyone who logs in to the panel can see the bot's data (as viewers; only people given manager get more)."""
+    hidden = f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="bot_id" value="{esc(bot["bot_id"])}">'
+    now_public = bool(bot.get("public"))
+    return (f'<details><summary>Visibility: {"public" if now_public else "private"}</summary>'
+            f'<p class="muted small">{"Everyone who logs in to the panel can see this bot\'s data as a viewer. They never see its key, and only people you made managers can do more." if now_public else "Only you and the people you shared it with can see this bot. Make it public to let everyone who logs in see its data as a viewer."}</p>'
+            f'<form class="inline" method="post" action="/panel/public">{hidden}<input type="hidden" name="public" value="{"0" if now_public else "1"}">'
+            f'<button type="submit">{"Make private" if now_public else "Make public"}</button></form></details>')
 
 
 def access_section(bot, csrf, level, members):
@@ -798,17 +807,25 @@ def apply_form(csrf):
 def bots_tab(store, user_id, csrf, now):
     mine = store.owned_by(user_id)
     shared = store.shared_with(user_id)
+    public = store.public_bots(user_id)
     waiting = store.waiting_for(user_id)
-    if not mine and not waiting and not shared:
+    if not mine and not waiting and not shared and not public:
         return ('<div class="empty"><h2>No bots with telemetry</h2><p>You don\'t have any bots with telemetry on this account yet. '
                 'Turn it on in your bot with <code>telemetry.enable(bot)</code> and set <code>TELEMETRY_OWNER_ID</code> to your user ID '
                 'to see its status here before it is approved, or apply for it below.</p></div>' + apply_form(csrf))
+
+    def cards(title, bots, note="", tag=None):
+        shown = [tag(b) if tag else None for b in bots]
+        grid = "".join(bot_card(b, now, t or "") for b, t in zip(bots, shown))
+        return f'<section><h2>{esc(title)}</h2>{f"<p class=muted>{note}</p>" if note else ""}<div class="cards">{grid}</div></section>' if bots else ""
+
     # approved bots are small cards that open the bot's page; the rest (pending, denied, removed) need their message and actions on the list
-    cards = [bot_card(b, now) for b in mine + shared if b["status"] == "approved"]
+    out = cards("Your bots", [b for b in mine if b["status"] == "approved"], tag=lambda b: "Public" if b.get("public") else "")
+    out += cards("Shared with you", [b for b in shared if b["status"] == "approved"], "Bots other people gave you access to.", tag=lambda b: "Manager" if b.get("level") == "manager" else "Viewer")
+    out += cards("Public bots", public, "Open to everyone who logs in. You can see their data, never their key.", tag=lambda b: "Viewer")
     rows = [owner_row(b, csrf, now) for b in mine + shared if b["status"] != "approved"]
     rows += [owner_row(b, csrf, now, key_box=False, claimed=True) for b in waiting]
-    grid = f'<div class="cards">{"".join(cards)}</div>' if cards else ""
-    return grid + "".join(rows) + apply_form(csrf)
+    return out + "".join(rows) + apply_form(csrf)
 
 
 def people_tab(store, role, query):

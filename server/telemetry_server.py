@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import telemetry_auth as auth  # noqa: E402
 import telemetry_badge as badge  # noqa: E402
 import telemetry_panel as panel  # noqa: E402
-from telemetry_store import CONSOLE, ReasonRequired, Store, UserLookupError, can_approve, can_change_owner, can_revoke, valid_id  # noqa: E402
+from telemetry_store import CONSOLE, ReasonRequired, Store, UserLookupError, can_approve, can_change_owner, can_revoke, invite_for, valid_id  # noqa: E402
 
 DEFAULT_SUPPORT_URL = "https://www.yapin.gg/invite/pythonlibrary"
 MAX_BODY = 64 * 1024
@@ -370,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
                                                                      ("Cross-Origin-Resource-Policy", "cross-origin")])
 
     def badge(self, name):
-        """Public live badges for READMEs (see telemetry_badge.py). A bot's badge exists only once it is approved and its owner saved an invite link."""
+        """Public live badges for READMEs (see telemetry_badge.py). A bot's badge exists once it is approved (its link is https://www.yapin.gg/bot/<BotID>)."""
         cfg = self.cfg
         if not cfg.badge_limit.allow(self.client()):
             return self.reply(429, {"error": "slow_down"}, {"Retry-After": "60"})
@@ -386,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
                 icons = list(pool.map(lambda b: cfg.fetch_image(b.get("avatar"), hosts, public=True) if b.get("avatar") else None, bots))
             return self.svg(badge.featured_badge([(b["name"] or b["bot_id"], b.get("servers"), b.get("members"), b.get("description"), i) for b, i in zip(bots, icons)]))
         bot = cfg.store.get_bot(name) if valid_id(name) else None
-        if not bot or bot["status"] != "approved" or not bot.get("invite_url"):
+        if not bot or bot["status"] != "approved" or not invite_for(bot):      # every bot has the default https://www.yapin.gg/bot/<BotID> link
             return self.reply(404, {"error": "not_found"})
         report = bot.get("last_report") or {}
         servers = (report.get("servers") or {}).get("count")
@@ -443,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.strip("/").split("/")[1:]       # after "api"
         bots = {b["bot_id"]: b for b in self.store.api_bots(user_id)}
         if parts == ["bots"]:
-            return self.reply(200, {"bots": [{"bot_id": b["bot_id"], "name": b["name"], "owner_id": b["owner_id"], "last_report_at": b["last_report_at"], "invite_url": b.get("invite_url"), "support_url": b.get("support_url"), "description": b.get("description"),
+            return self.reply(200, {"bots": [{"bot_id": b["bot_id"], "name": b["name"], "owner_id": b["owner_id"], "last_report_at": b["last_report_at"], "invite_url": invite_for(b), "support_url": b.get("support_url"), "description": b.get("description"),
                                               "sdk_version": b["sdk_version"], "package_version": b["package_version"]} for b in bots.values()]})
         bot = bots.get(parts[1]) if len(parts) >= 2 and parts[0] == "bots" else None
         if not bot or len(parts) > 3:
@@ -534,6 +534,12 @@ class Handler(BaseHTTPRequestHandler):
                 store.set_invite(me, bot_id, form.get("invite_url", ""))
                 store.audit(me, "bot.invite", "approver", bot_id, None, form.get("invite_url") or "cleared")
                 ok = "invite_saved"
+            elif path == "/panel/public":
+                tab = "bots"
+                make_public = form.get("public") == "1"
+                store.set_public(me, bot_id, make_public)
+                store.audit(me, "bot.public", "approver", bot_id, None, "public" if make_public else "private")
+                ok = "public_on" if make_public else "public_off"
             elif path == "/panel/support":
                 tab = "bots"
                 store.set_support(me, bot_id, form.get("support_url", ""))

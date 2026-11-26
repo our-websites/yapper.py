@@ -261,7 +261,24 @@ class StoreTests(unittest.TestCase):
         bot = self.s.get_bot("old1")
         self.assertEqual((bot["status"], bot["name"], bot["owner_id"]), ("approved", "Old Bot", None))
         self.assertTrue(bot["key"])
+        self.assertEqual(bot["last_report_at"], 1767225600)          # 2026-01-01T00:00:00 UTC
         self.assertIsNone(self.s.import_legacy("/nope/missing.json") or None)
+
+    def test_imported_report_times_are_utc_in_any_timezone_and_season(self):
+        old = os.environ.get("TZ")
+        self.addCleanup(lambda: (os.environ.__setitem__("TZ", old) if old else os.environ.pop("TZ", None), time.tzset()))
+        for zone in ("America/New_York", "Australia/Sydney", "UTC"):
+            os.environ["TZ"] = zone
+            time.tzset()
+            for stamp, expected in (("2026-07-01T12:00:00", 1782907200), ("2026-01-01T12:00:00", 1767268800)):     # summer and winter (daylight saving)
+                s = Store(":memory:")
+                with tempfile.TemporaryDirectory() as d:
+                    approved, data = os.path.join(d, "a.json"), os.path.join(d, "r.jsonl")
+                    json.dump({"bots": {"old1": {}}}, open(approved, "w"))
+                    open(data, "w").write(json.dumps({"received_at": stamp + "+00:00", "report": {"bot": {"id": "old1"}}}) + "\n")
+                    s.import_legacy(approved, data)
+                self.assertEqual(s.get_bot("old1")["last_report_at"], expected, (zone, stamp))
+                s.close()
 
 
 class TokenApiTests(Case):
@@ -1079,6 +1096,83 @@ class SharingPanelTests(Case):
         self.assertIn("msg=denied", self.loc(self.act("own", "/panel/owner", bot_id="b1", owner_id="x")))   # the bot's owner can't hand it over alone
 
 
+class PublicBotTests(Case):
+    def setUp(self):
+        super().setUp()
+        self.store.set_role("boss", "app", "approver")
+        self.approve("b1", "own", "Shared Bot")
+        self.approve("b2", "own", "Private Bot")
+        self.store.record_report("b1", {"schema": 1, "bot": {"id": "b1", "username": "Shared Bot"}, "servers": {"count": 3},
+                                        "commands": [{"name": "ping", "description": "SECRET-COMMAND-TEXT", "options": []}]})
+        self.store.record_login("someone", "Someone", None)
+
+    def loc(self, r):
+        return r[3].getheader("Location")
+
+    def test_bots_are_private_until_the_owner_makes_them_public(self):
+        self.assertEqual(self.call("GET", "/bots/b1", user="someone")[0], 303)      # no access: sent back to the list
+        self.assertNotIn("Public bots", self.view("someone", "/panel/bots"))
+        self.assertIn("msg=public_on", self.loc(self.act("own", "/panel/public", bot_id="b1", public="1")))
+        self.assertTrue(self.store.get_bot("b1")["public"])
+
+    def test_everyone_else_is_a_viewer_of_a_public_bot_and_never_sees_the_key(self):
+        self.act("own", "/panel/public", bot_id="b1", public="1")
+        page = self.view("someone", "/bots/b1")
+        for needle in ("Shared Bot", "SECRET-COMMAND-TEXT", "viewer of this public bot"):
+            self.assertIn(needle, page)
+        self.assertNotIn('data-key-for="', page)
+        self.assertNotIn("Who can see this bot", page)
+        self.assertNotIn("Visibility", page)
+        self.assertEqual(self.store.access_level("b1", "someone"), "viewer")
+        self.assertIsNone(self.store.access_level("b2", "someone"))                         # the other bot is still private
+        cookie, token = self.csrf("someone")
+        self.assertEqual(self.call("POST", "/panel/key", {"bot_id": "b1"}, {"Cookie": f"{auth.SESSION_COOKIE}={cookie}", "X-CSRF-Token": token})[0], 404)
+        self.assertIn("msg=denied", self.loc(self.act("someone", "/panel/rotate-key", bot_id="b1")))
+        self.assertIn("msg=denied", self.loc(self.act("someone", "/panel/share", bot_id="b1", user_id="x1", level="viewer")))
+        self.assertIn("msg=denied", self.loc(self.act("someone", "/panel/public", bot_id="b1", public="0")))
+
+    def test_managers_stay_managers_on_a_public_bot(self):
+        self.store.share("own", "b1", "mgr", "manager")
+        self.act("own", "/panel/public", bot_id="b1", public="1")
+        self.assertEqual(self.store.access_level("b1", "mgr"), "manager")
+        self.assertIn('data-key-for="', self.view("mgr", "/bots/b1"))
+
+    def test_only_the_owner_can_change_visibility(self):
+        self.store.share("own", "b1", "mgr", "manager")
+        for user in ("mgr", "app", "boss", "someone"):
+            self.assertIn("msg=denied", self.loc(self.act(user, "/panel/public", bot_id="b1", public="1")), user)
+        self.assertFalse(self.store.get_bot("b1")["public"])
+        self.act("own", "/panel/public", bot_id="b1", public="1")
+        self.assertIn("msg=public_off", self.loc(self.act("own", "/panel/public", bot_id="b1", public="0")))
+        self.assertEqual(self.call("GET", "/bots/b1", user="someone")[0], 303)      # no access: sent back to the list
+
+    def test_the_bots_tab_keeps_your_bots_shared_bots_and_public_bots_apart(self):
+        self.approve("b3", "other-owner", "Friend Bot")
+        self.approve("b4", "other-owner", "Open Bot")
+        self.approve("b5", "other-owner", "Hidden Bot")
+        self.store.share("other-owner", "b3", "own", "viewer")
+        self.act("other-owner", "/panel/public", bot_id="b4", public="1")
+        self.act("own", "/panel/public", bot_id="b1", public="1")
+        page = self.view("own", "/panel/bots")
+        sections = {m.group(1): m.group(2) for m in re.finditer(r"<section><h2>([^<]+)</h2>(.*?)</section>", page, re.S)}
+        self.assertEqual(sorted(k for k in sections if k != "Apply for a bot"), ["Public bots", "Shared with you", "Your bots"])
+        self.assertIn("Shared Bot", sections["Your bots"])
+        self.assertIn("Private Bot", sections["Your bots"])
+        self.assertIn("Friend Bot", sections["Shared with you"])
+        self.assertIn("Open Bot", sections["Public bots"])
+        for name in ("Friend Bot", "Hidden Bot", "Open Bot"):
+            self.assertNotIn(name, sections["Your bots"])
+        self.assertNotIn("Shared Bot", sections["Public bots"])                              # your own public bot is not listed twice
+        self.assertNotIn("Hidden Bot", page)
+
+    def test_sharing_a_public_bot_still_records_real_members(self):
+        self.act("own", "/panel/public", bot_id="b1", public="1")
+        self.assertIn("msg=shared", self.loc(self.act("own", "/panel/share", bot_id="b1", user_id="mgr", level="manager")))
+        self.assertEqual([m["user_id"] for m in self.store.members("b1")], ["mgr"])
+        self.assertIn("msg=unshared", self.loc(self.act("own", "/panel/unshare", bot_id="b1", user_id="mgr")))
+        self.assertEqual(self.store.members("b1"), [])
+
+
 class PanelFeatureTests(Case):
     """People, stats, announcements, activity, timezones, API keys, the invite link and profile pictures."""
 
@@ -1168,7 +1262,7 @@ class PanelFeatureTests(Case):
 
     def test_bot_owner_sees_what_others_did_to_their_bot(self):
         self.act("own", "/panel/share", bot_id="b1", user_id="Viewy", level="viewer")
-        self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")
+        self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/bot/promo")
         events = [(e["kind"], e["actor"]) for e in self.store.read_audit(bot_id="b1")]
         self.assertIn(("bot.share", "own"), events)
         self.assertIn(("bot.invite", "own"), events)
@@ -1228,19 +1322,21 @@ class PanelFeatureTests(Case):
             self.store.create_api_key("own", "one more")
 
     def test_invite_link_is_saved_by_owners_and_the_readme_link_is_for_staff_only(self):
-        for bad in ("https://evil.example/invite/x", "http://www.yapin.gg/invite/x", "https://www.yapin.gg/invite/x y", "javascript:alert(1)"):
+        for bad in ("https://evil.example/bot/x", "http://www.yapin.gg/bot/x", "https://www.yapin.gg/bot/x y", "javascript:alert(1)",
+                    "https://www.yapin.gg/invite/promo", "https://www.yapin.gg/i/promo"):      # a server invite is not a bot link
             self.assertIn("msg=invalid", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url=bad)), bad)
-        self.assertIn("msg=invite_saved", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/promo")))
-        line = "[**Promo Bot**](https://www.yapin.gg/invite/promo)"
+        self.assertIn("https://www.yapin.gg/bot/b1", self.view("app", "/panel/b1"))          # without anything saved: the default bot link
+        self.assertIn("msg=invite_saved", self.location(self.act("own", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/bot/promo")))
+        line = "[**Promo Bot**](https://www.yapin.gg/bot/promo)"
         for page in (self.view("own", "/bots/b1"), self.view("own", "/bots/b1")):
-            self.assertIn("https://www.yapin.gg/invite/promo", page)                       # owners see and can change the link...
+            self.assertIn("https://www.yapin.gg/bot/promo", page)                       # owners see and can change the link...
             self.assertNotIn("**Promo Bot**", page)                                         # ...but not the Markdown
             self.assertNotIn("README link", page)
         self.assertIn(line, self.view("app", "/panel/approvals"))                           # staff get it in the approvals list
         self.assertIn(line, self.view("app", "/panel/b1"))                                  # and on the bot's staff page
-        self.assertIn("msg=denied", self.location(self.act("app", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
+        self.assertIn("msg=denied", self.location(self.act("app", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/bot/xx")))
         self.store.share("own", "b1", "v1", "viewer")
-        self.assertIn("msg=denied", self.location(self.act("v1", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/invite/xx")))
+        self.assertIn("msg=denied", self.location(self.act("v1", "/panel/invite", bot_id="b1", invite_url="https://www.yapin.gg/bot/xx")))
         self.act("own", "/panel/invite", bot_id="b1", invite_url="")
         self.assertIsNone(self.store.get_bot("b1")["invite_url"])
 
@@ -1314,10 +1410,12 @@ class PanelFeatureTests(Case):
         bot = {"bot_id": "5e872d4a-1892-43ce-aaae-40ecd7acd768", "name": 'Sh"a[p]es <x> *_`', "invite_url": None,
                "avatar": "https://files.yapper.website/avatars/a.png"}
         self.assertEqual(panel.promo_line(bot), '[<img src="https://files.yapper.website/avatars/a.png" width="24" height="24" align="absmiddle"> '
-                                                '**Sh"a\\[p\\]es \\<x\\> \\*\\_\\`**](https://yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)')
-        self.assertEqual(panel.promo_line(dict(bot, bot_id="12345")), "")                    # not a Yapin' bot ID: needs a saved link
-        self.assertEqual(panel.promo_line(dict(bot, name="Plain", avatar=None, invite_url="https://www.yapin.gg/invite/own")),
-                         "[**Plain**](https://www.yapin.gg/invite/own)")
+                                                '**Sh"a\\[p\\]es \\<x\\> \\*\\_\\`**](https://www.yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)')
+        self.assertEqual(panel.promo_line(dict(bot, bot_id="a b")), "")                      # an ID that can't be in a link
+        self.assertEqual(panel.promo_line(dict(bot, name="Plain", avatar=None, invite_url="https://www.yapin.gg/bot/own")),
+                         "[**Plain**](https://www.yapin.gg/bot/own)")
+        self.assertEqual(panel.promo_line(dict(bot, name="Plain", avatar=None, invite_url="https://www.yapin.gg/invite/own")).split("](")[1],
+                         "https://www.yapin.gg/bot/5e872d4a-1892-43ce-aaae-40ecd7acd768)")   # an old saved server invite is ignored
         self.assertNotIn("<img", panel.promo_line(dict(bot, avatar="http://tracker.example/x.png")))
 
     def test_pictures_only_come_from_trusted_hosts(self):
@@ -1582,7 +1680,6 @@ class BadgeTests(Case):
         self.fetched = []
         self.cfg.fetch_image = lambda url, hosts, **kw: (self.fetched.append((url, set(hosts))), "data:image/png;base64,AAAA")[1]
         self.approve("b1", "own1", name="<b>Dice</b> & Co")
-        self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
         tok = self.token(key=self.store.get_bot("b1")["key"])[1]["token"]
         self.report(tok, bot={"id": "b1", "username": "<b>Dice</b> & Co", "avatar": "avatar/a.png"})
 
@@ -1662,19 +1759,25 @@ class BadgeTests(Case):
         self.assertNotIn("<b>", text)
         self.assertIn("&lt;b&gt;Dice", text)
 
-    def test_bot_badge_needs_approval_and_an_invite(self):
-        self.store.set_invite("own1", "b1", "")
-        self.assertEqual(self.call("GET", "/badge/b1.svg")[0], 404)
+    def test_the_default_bot_link_counts_so_every_approved_bot_has_a_badge(self):
+        self.assertEqual(self.store.get_bot("b1")["invite_url"], None)       # nothing was saved
+        self.assertEqual(self.call("GET", "/badge/b1.svg")[0], 200)
         self.assertEqual(self.call("GET", "/badge/nobody.svg")[0], 404)
-        self.store.set_invite("own1", "b1", "https://www.yapin.gg/invite/dice")
         self.store.record_login("own2", "Two", None)
         self.store.apply("own2", "p1")
-        self.assertEqual(self.call("GET", "/badge/p1.svg")[0], 404)
+        self.assertEqual(self.call("GET", "/badge/p1.svg")[0], 404)           # still needs approval
+
+    def test_a_saved_server_invite_does_not_replace_the_bot_link(self):
+        bot, members = self.store._read("b1")
+        bot["invite_url"] = "https://www.yapin.gg/invite/dice"
+        self.store._put(bot, members)
+        self.assertEqual(store_mod.invite_for(self.store.get_bot("b1")), "https://www.yapin.gg/bot/b1")
+        self.assertEqual(self.call("GET", "/badge/b1.svg")[0], 200)
 
     def test_staff_page_offers_the_live_badge_markdown(self):
         self.store.set_role("boss", "app", "approver")
         page = self.view("app", "/panel/b1")
-        self.assertIn(f"/badge/b1.svg)](https://www.yapin.gg/invite/dice)", page)
+        self.assertIn("/badge/b1.svg)](https://www.yapin.gg/bot/b1)", page)
         self.assertNotIn("<b>Dice", page)
 
     def test_icon_is_only_fetched_from_allowed_hosts(self):

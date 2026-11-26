@@ -37,8 +37,8 @@ Public SVGs drawn on request from the current numbers, so a README that shows on
 
 - `/badge/stats.svg`: how many bots use telemetry and how many servers they are in.
 - `/badge/featured.svg`: a grid of up to 100 approved bots (small icon, name, description, server and member counts), so a README's bot list fills itself in.
-- `/badge/<bot id>.svg`: one bot's icon, name and server count. It exists only for approved bots whose owner saved an invite link.
-  Link it to the invite: `[![Name](https://your-panel/badge/<id>.svg)](https://yapin.gg/bot/<id>)`. The staff page for a bot (`/panel/<bot id>`) shows this line ready to copy.
+- `/badge/<bot id>.svg`: one bot's icon, name and server count. It exists for every approved bot.
+  Link it to the bot's page: `[![Name](https://your-panel/badge/<id>.svg)](https://www.yapin.gg/bot/<id>)`. The staff page for a bot (`/panel/<bot id>`) shows this line ready to copy.
 
 The icon is fetched by the server (only from Yapin's image hosts, small images, cached) and embedded, because an SVG shown in a README can't load other images.
 
@@ -61,6 +61,8 @@ Staff see which bots exist, their status and their report data (stats and the la
 A bot's owner can give other people access from the **My bots** tab ("Who can see this bot"): a **viewer** sees the data and
 when the next report is due; a **manager** also gets the private key, can make a new one, and can add viewers. Only the owner can
 add or remove managers; anyone can leave. A bot can be shared with up to 20 people. Staff roles don't give access to a bot's data.
+
+The owner can also make a bot **public** ("Visibility" on the bot's page). Then everyone who logs in to the panel is a viewer: they can see its data, never its key, and they find it under **Public bots**. People the owner made managers stay managers. The **My bots** tab keeps your own bots, the bots shared with you, and public bots in separate lists.
 
 ## Switching an owner
 
@@ -131,9 +133,9 @@ of this server (`approved_bots.json`) are imported once on start; set their owne
   owner/approval actions, activity on the bot and the README link, but never the key.
 - **Bot cards.** In **My bots** and `/panel`, an approved bot is a small card: picture, name, description and when it last reported. Pressing the card opens its page
   with the stats. Bots that are pending, denied or removed stay as full rows, because their message and actions are on the list.
-- **Invite link and README link**: owners and managers save their bot's yapin.gg link on its page. The ready-to-paste Markdown link (the bot's icon and name as one
-  link that opens the bot to add it) is made for the team only: on `/panel/<bot id>` and under **Promo links** in Approvals. It uses the saved link, or
-  `https://yapin.gg/bot/<bot id>` when the ID is a Yapin' bot ID (like shapes-bot's `/add`).
+- **Invite link and README link**: a bot's link is always its page on Yapin', `https://www.yapin.gg/bot/<bot id>`, so every bot has one without setting anything up
+  (a server invite is not a bot link and is refused). Owners and managers can save a different bot link on the bot's page. The ready-to-paste Markdown link (the bot's icon
+  and name as one link that opens the bot to add it) is made for the team only: on `/panel/<bot id>` and under **Promo links** in Approvals.
 - **Support server and description.** Owners and managers save a yapin.gg support-server invite on the bot's page (`/panel/support`); it is shown to the bot's people on the bot page. The bot's description is reported by the bot itself (its bio from its own profile, or its member info in a server it is in, up to 300 characters, shown as plain text), so owners change it with `set_profile(bio=...)`.
 - **Bot pictures.** Bots report their picture as Yapin' gives it (a path under `files.yapper.website/avatars/`); the panel only loads pictures from the allowed hosts.
 - **Versions.** Each bot shows two: the SDK's own version (`__version__` in `main.py`) and the PyPI package's.

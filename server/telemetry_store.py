@@ -3,6 +3,7 @@
 Each bot gets its own PickleDB file, telemetry_data/<bot id>_data.json (its record, private key, latest report and who it is
 shared with), so the number of bots is not limited by one big file and saving a bot only rewrites that bot's file. Staff roles
 live in one small PickleDB file. Memory only holds a light index of every bot (status, owner, name, times)."""
+import calendar
 import hashlib
 import json
 import os
@@ -59,8 +60,27 @@ INVITE = re.compile(r"^https://(?:www\.)?yapin\.gg/(?:invite|i|bot)/[A-Za-z0-9_-
 
 
 def valid_invite(value):
-    """A Yapin' invite or bot page link (https://www.yapin.gg/invite/<code>, /i/<code> or /bot/<id>)."""
+    """A Yapin' server invite or bot page link (https://www.yapin.gg/invite/<code>, /i/<code> or /bot/<id>); the support server uses the first two."""
     return isinstance(value, str) and bool(INVITE.match(value))
+
+
+BOT_LINK = re.compile(r"^https://(?:www\.)?yapin\.gg/bot/[A-Za-z0-9_-]{2,64}$")
+_BOT_ID = re.compile(r"^[A-Za-z0-9_-]{2,64}$")
+
+
+def valid_bot_link(value):
+    """A link to a bot's page on Yapin': https://www.yapin.gg/bot/<BotID>. (Server invites are not bot links.)"""
+    return isinstance(value, str) and bool(BOT_LINK.match(value))
+
+
+def invite_for(bot):
+    """The link that adds a bot: https://www.yapin.gg/bot/<BotID>. Every bot has one, so a saved link is only an override, and only a bot
+    link counts (a server invite saved earlier is ignored)."""
+    saved = bot.get("invite_url")
+    if valid_bot_link(saved):
+        return saved
+    bot_id = str(bot.get("bot_id") or "")
+    return f"https://www.yapin.gg/bot/{bot_id}" if _BOT_ID.match(bot_id) else ""
 
 
 def valid_id(value):
@@ -134,7 +154,7 @@ def _new_bot(bot_id, now, **fields):
     bot = {"bot_id": bot_id, "name": None, "status": "pending", "owner_id": None, "claimed_owner_id": None, "applicant_id": None,
            "key": None, "first_seen": now, "last_seen": now, "approved_by": None, "approved_at": None, "interval": DEFAULT_INTERVAL,
            "sdk_version": None, "package_version": None, "last_report_at": None, "last_report": None, "avatar": None, "samples": [], "invite_url": None, "support_url": None, "description": None,
-           "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None, "members": None}
+           "deny_reason": None, "denied_by": None, "denied_at": None, "servers": None, "members": None, "public": False}
     bot.update(fields)
     return bot
 
@@ -457,15 +477,33 @@ class Store:
 
     # ---- sharing a bot with other people ----
 
-    def access_level(self, bot_id, user_id):
-        """owner, manager or viewer for this person and bot; None when they have no access. Only approved bots can be reached."""
+    def access_level(self, bot_id, user_id, public=True):
+        """owner, manager or viewer for this person and bot; None when they have no access. Only approved bots can be reached.
+        On a public bot everyone else is a viewer (unless they were given manager); public=False ignores that, to see who was really given access."""
         with self._lock:
             bot = self._index.get(str(bot_id))
             if not bot or bot["status"] != "approved":
                 return None
             if bot["owner_id"] == str(user_id):
                 return "owner"
-            return self._member_of.get(str(user_id), {}).get(bot["bot_id"])
+            level = self._member_of.get(str(user_id), {}).get(bot["bot_id"])
+            return level or ("viewer" if public and bot.get("public") else None)
+
+    def set_public(self, user_id, bot_id, public):
+        """Only the owner can make a bot public (everyone who logs in to the panel can then see its data, never its key) or private again."""
+        with self._lock:
+            if self.access_level(bot_id, user_id, public=False) != "owner":
+                raise PermissionError("Only the owner can change that.")
+            bot, members = self._read(bot_id)
+            bot["public"] = bool(public)
+            self._put(bot, members)
+
+    def public_bots(self, user_id):
+        """Approved public bots this person has no other access to (owned and shared bots are listed on their own), as full records."""
+        with self._lock:
+            ids = [b["bot_id"] for b in self._index.values() if b["status"] == "approved" and b.get("public") and self.access_level(b["bot_id"], user_id, public=False) is None]
+        out = [b for b in (self.get_bot(i) for i in ids) if b]
+        return sorted(out, key=lambda b: (b["name"] or b["bot_id"]).casefold())
 
     def members(self, bot_id):
         rows = self._read(bot_id)[1].values()
@@ -485,7 +523,7 @@ class Store:
                 raise ValueError("That person already owns this bot.")
             if user_id == str(actor):
                 raise ValueError("You already have access.")
-            current = self.access_level(bot_id, user_id)
+            current = self.access_level(bot_id, user_id, public=False)
             if mine == "manager" and current == "manager":
                 raise PermissionError("Only the owner can change a manager.")
             if current is None and len(members) >= MAX_MEMBERS:
@@ -497,7 +535,7 @@ class Store:
         user_id = str(user_id).strip()
         with self._lock:
             mine = self.access_level(bot_id, actor)
-            theirs = self.access_level(bot_id, user_id)
+            theirs = self.access_level(bot_id, user_id, public=False)
             if theirs == "owner":
                 raise PermissionError("The owner can't be removed.")
             if theirs not in ("viewer", "manager"):
@@ -611,10 +649,11 @@ class Store:
             self._put(bot, members)
 
     def set_invite(self, user_id, bot_id, url):
-        """The link people use to add this bot (a yapin.gg invite). Only its owner or a manager they added; empty clears it."""
+        """Override the link people use to add this bot. It must be a bot link (https://www.yapin.gg/bot/<BotID>), never a server invite.
+        Only its owner or a manager they added; empty goes back to the default."""
         url = str(url or "").strip()
-        if url and not valid_invite(url):
-            raise ValueError("That must be a https://www.yapin.gg/invite/... (or /bot/...) link.")
+        if url and not valid_bot_link(url):
+            raise ValueError("That must be a https://www.yapin.gg/bot/<BotID> link, not a server invite.")
         with self._lock:
             if self.access_level(bot_id, user_id) not in ("owner", "manager"):
                 raise PermissionError("That is not your bot.")
@@ -949,7 +988,7 @@ class Store:
             rec = latest.get(bot_id)
             if rec:
                 try:
-                    stamp = int(time.mktime(time.strptime(rec["received_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone)
+                    stamp = calendar.timegm(time.strptime(rec["received_at"][:19], "%Y-%m-%dT%H:%M:%S"))
                 except (KeyError, ValueError):
                     stamp = int(now or time.time())
                 self.record_report(bot_id, rec["report"], stamp)

@@ -155,7 +155,7 @@ Once you are approved, log in to the panel with Yapin', open your bot, click **S
 `.env` as `TELEMETRY_KEY=...`, then restart your bot. The key proves reports really come from your bot, so keep it private
 like a token (you can make a new one in the panel if it leaks). The panel shows what your bot has sent and when the next report is due.
 You can have several bots: apply for each one in the panel's **My bots** tab, and manage them all from there. You can also share a bot with
-other people there, as viewers (see the data) or managers (also the key). If you move to a new Yapin' account, ask in the support server
+other people there, as viewers (see the data) or managers (also the key), or make a bot public so everyone who logs in can see its data as a viewer. If you move to a new Yapin' account, ask in the support server
 and an approver can switch your bots to it.
 
 ### How we use the data
